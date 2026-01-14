@@ -1,4 +1,5 @@
 {
+  "description": "Sisyphus orchestration hooks for keyword detection, tool enforcement, and continuation persistence",
   "hooks": {
     "UserPromptSubmit": [
       {
