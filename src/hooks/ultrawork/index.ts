@@ -25,8 +25,6 @@ export interface UltraworkState {
   last_checked_at: string;
   /** Whether this ultrawork session is linked to a ralph-loop session */
   linked_to_ralph?: boolean;
-  /** Completion promise string - when outputted, signals task completion */
-  completion_promise?: string;
 }
 
 const _DEFAULT_STATE: UltraworkState = {
@@ -34,8 +32,7 @@ const _DEFAULT_STATE: UltraworkState = {
   started_at: '',
   original_prompt: '',
   reinforcement_count: 0,
-  last_checked_at: '',
-  completion_promise: 'DONE'
+  last_checked_at: ''
 };
 
 /**
@@ -141,8 +138,7 @@ export function activateUltrawork(
     session_id: sessionId,
     reinforcement_count: 0,
     last_checked_at: new Date().toISOString(),
-    linked_to_ralph: linkedToRalph,
-    completion_promise: 'DONE'
+    linked_to_ralph: linkedToRalph
   };
 
   return writeUltraworkState(state, directory);

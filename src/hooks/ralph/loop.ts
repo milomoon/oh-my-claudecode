@@ -1,11 +1,8 @@
 /**
  * Ralph Hook
  *
- * Self-referential work loop that continues until a completion promise is detected.
+ * Self-referential work loop that continues until cancelled via /oh-my-claudecode:cancel.
  * Named after the character who keeps working until the job is done.
- *
- * DEPRECATED: The <promise> completion pattern is being phased out.
- * New sessions use /oh-my-claudecode:cancel for clean exit. Remove in next major version.
  *
  * Enhanced with PRD (Product Requirements Document) support for structured task tracking.
  * When a prd.json exists, completion is based on all stories having passes: true.
@@ -15,7 +12,6 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import {
   readPrd,
   getPrdStatus,
@@ -59,8 +55,6 @@ export interface RalphLoopState {
   iteration: number;
   /** Maximum iterations before stopping */
   max_iterations: number;
-  /** DEPRECATED: The promise phrase to detect for completion */
-  completion_promise: string;
   /** When the loop started */
   started_at: string;
   /** The original prompt/task */
@@ -79,8 +73,6 @@ export interface RalphLoopState {
 export interface RalphLoopOptions {
   /** Maximum iterations (default: 10) */
   maxIterations?: number;
-  /** DEPRECATED: Custom completion promise (default: "TASK_COMPLETE") */
-  completionPromise?: string;
   /** Disable auto-activation of ultrawork (default: false - ultrawork is enabled) */
   disableUltrawork?: boolean;
 }
@@ -92,7 +84,6 @@ export interface RalphLoopHook {
 }
 
 const DEFAULT_MAX_ITERATIONS = 10;
-const DEFAULT_COMPLETION_PROMISE = 'TASK_COMPLETE';
 
 /**
  * Get the state file path for Ralph Loop
@@ -204,50 +195,6 @@ export function incrementRalphIteration(directory: string): RalphLoopState | nul
 }
 
 /**
- * Detect completion promise in session transcript
- *
- * DEPRECATED: The <promise> completion pattern is being phased out.
- * New sessions use /oh-my-claudecode:cancel for clean exit. Remove in next major version.
- */
-export function detectCompletionPromise(
-  sessionId: string,
-  promise: string
-): boolean {
-  // Try to find transcript in Claude's session directory
-  const claudeDir = join(homedir(), '.claude');
-  const possiblePaths = [
-    join(claudeDir, 'sessions', sessionId, 'transcript.md'),
-    join(claudeDir, 'sessions', sessionId, 'messages.json'),
-    join(claudeDir, 'transcripts', `${sessionId}.md`)
-  ];
-
-  for (const transcriptPath of possiblePaths) {
-    if (existsSync(transcriptPath)) {
-      try {
-        const content = readFileSync(transcriptPath, 'utf-8');
-        // DEPRECATED: The <promise> completion pattern is being phased out.
-        // New sessions use /oh-my-claudecode:cancel for clean exit. Remove in next major version.
-        const pattern = new RegExp(`<promise>\\s*${escapeRegex(promise)}\\s*</promise>`, 'is');
-        if (pattern.test(content)) {
-          return true;
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
- * Escape regex special characters
- */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
  * Create a Ralph Loop hook instance
  */
 export function createRalphLoopHook(directory: string): RalphLoopHook {
@@ -269,7 +216,6 @@ export function createRalphLoopHook(directory: string): RalphLoopHook {
       active: true,
       iteration: 1,
       max_iterations: options?.maxIterations ?? DEFAULT_MAX_ITERATIONS,
-      completion_promise: options?.completionPromise ?? DEFAULT_COMPLETION_PROMISE,
       started_at: now,
       prompt,
       session_id: sessionId,

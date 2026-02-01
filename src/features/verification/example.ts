@@ -53,9 +53,8 @@ export async function exampleRalphVerification(): Promise<void> {
   const validation = await validateChecklist(checklist);
 
   if (validation.valid) {
-    // DEPRECATED: The <promise> completion pattern is being phased out.
-    // New sessions use /oh-my-claudecode:cancel for clean exit. Remove in next major version.
-    console.log('<promise>TASK_COMPLETE</promise>');
+    // All checks passed - use cancel to cleanly exit the ralph loop
+    console.log('[RALPH VERIFIED] All checks passed. Run /oh-my-claudecode:cancel to exit.');
   } else {
     console.log('Verification failed:');
     console.log(validation.issues.join('\n'));
@@ -180,9 +179,8 @@ export async function exampleAutopilotValidation(): Promise<void> {
   console.log(report);
 
   if (checklist.summary?.verdict === 'approved') {
-    // DEPRECATED: The <promise> completion pattern is being phased out.
-    // New sessions use /oh-my-claudecode:cancel for clean exit. Remove in next major version.
-    console.log('<promise>AUTOPILOT_COMPLETE</promise>');
+    // All checks passed - use cancel to cleanly exit autopilot
+    console.log('[AUTOPILOT VERIFIED] All checks passed. Run /oh-my-claudecode:cancel to exit.');
   }
 }
 

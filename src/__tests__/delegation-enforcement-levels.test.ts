@@ -447,7 +447,6 @@ describe('delegation-enforcement-levels', () => {
         readRalphState: vi.fn(() => null),
         incrementRalphIteration: vi.fn(),
         clearRalphState: vi.fn(),
-        detectCompletionPromise: vi.fn(),
         createRalphLoopHook: vi.fn(() => ({ startLoop: vi.fn() })),
         readVerificationState: vi.fn(() => null),
         startVerification: vi.fn(),

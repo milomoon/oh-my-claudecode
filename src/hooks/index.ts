@@ -28,7 +28,6 @@ export {
   clearRalphState,
   clearLinkedUltraworkState,
   incrementRalphIteration,
-  detectCompletionPromise,
   isUltraQAActive,
   // PRD Integration
   hasPrd,
