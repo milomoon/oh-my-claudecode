@@ -1,0 +1,66 @@
+import { execSync } from 'node:child_process';
+import type { GitProvider, PRInfo, IssueInfo } from './types.js';
+
+export class GitHubProvider implements GitProvider {
+  readonly name = 'github' as const;
+  readonly displayName = 'GitHub';
+  readonly prTerminology = 'PR' as const;
+  readonly prRefspec = 'pull/{number}/head:{branch}';
+
+  detectFromRemote(url: string): boolean {
+    return url.includes('github.com');
+  }
+
+  viewPR(number: number, owner?: string, repo?: string): PRInfo | null {
+    try {
+      const repoFlag = owner && repo ? ` --repo ${owner}/${repo}` : '';
+      const raw = execSync(
+        `gh pr view ${number}${repoFlag} --json title,headRefName,baseRefName,body,url,author`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const data = JSON.parse(raw);
+      return {
+        title: data.title,
+        headBranch: data.headRefName,
+        baseBranch: data.baseRefName,
+        body: data.body,
+        url: data.url,
+        author: data.author?.login,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  viewIssue(number: number, owner?: string, repo?: string): IssueInfo | null {
+    try {
+      const repoFlag = owner && repo ? ` --repo ${owner}/${repo}` : '';
+      const raw = execSync(
+        `gh issue view ${number}${repoFlag} --json title,body,labels,url`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const data = JSON.parse(raw);
+      return {
+        title: data.title,
+        body: data.body,
+        labels: data.labels?.map((l: { name: string }) => l.name),
+        url: data.url,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  checkAuth(): boolean {
+    try {
+      execSync('gh auth status', { stdio: ['pipe', 'pipe', 'pipe'] });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getRequiredCLI(): string | null {
+    return 'gh';
+  }
+}
