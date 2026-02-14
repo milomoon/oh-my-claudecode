@@ -1206,8 +1206,8 @@ npm install -g oh-my-claude-sisyphus
 
 **Getting Help**
 ```
-/oh-my-claudecode:help    - Usage guide
-/oh-my-claudecode:doctor  - Diagnose issues
+/oh-my-claudecode:omc-help    - Usage guide
+/oh-my-claudecode:omc-doctor  - Diagnose issues
 ```
 
 Note: The GitHub repo has all documentation, examples, and issue tracking.

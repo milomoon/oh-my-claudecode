@@ -9,10 +9,10 @@
  * Bash scripts were deprecated in v3.8.6 and removed in v3.9.0.
  */
 
-import { homedir } from "os";
 import { join, dirname } from "path";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { getConfigDir } from '../utils/config-dir.js';
 
 // =============================================================================
 // TEMPLATE LOADER (loads hook scripts from templates/hooks/)
@@ -20,13 +20,27 @@ import { fileURLToPath } from "url";
 
 /**
  * Get the package root directory (where templates/ lives)
- * Works for both development (src/) and production (dist/)
+ * Works for both development (src/), production (dist/), and CJS bundles (bridge/).
+ * When esbuild bundles to CJS, import.meta is replaced with {} so we
+ * fall back to __dirname which is natively available in CJS.
  */
 function getPackageDir(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // From src/installer/ or dist/installer/, go up two levels to package root
-  return join(__dirname, "..", "..");
+  try {
+    if (import.meta?.url) {
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = dirname(__filename);
+      // From src/installer/ or dist/installer/, go up two levels to package root
+      return join(__dirname, "..", "..");
+    }
+  } catch {
+    // import.meta.url unavailable — fall through to CJS path
+  }
+  // CJS bundle path: from bridge/ go up 1 level to package root
+  // eslint-disable-next-line no-undef
+  if (typeof __dirname !== "undefined") {
+    return join(__dirname, "..");
+  }
+  return process.cwd();
 }
 
 /**
@@ -66,7 +80,7 @@ export function shouldUseNodeHooks(): boolean {
 
 /** Get the Claude config directory path (cross-platform) */
 export function getClaudeConfigDir(): string {
-  return join(homedir(), ".claude");
+  return getConfigDir();
 }
 
 /** Get the hooks directory path */
@@ -97,7 +111,7 @@ TELL THE USER WHAT AGENTS YOU WILL LEVERAGE NOW TO SATISFY USER'S REQUEST.
 
 ## AGENT UTILIZATION PRINCIPLES (by capability, not by name)
 - **Codebase Exploration**: Spawn exploration agents using BACKGROUND TASKS for file patterns, internal implementations, project structure
-- **Documentation & References**: Use researcher-type agents via BACKGROUND TASKS for API references, examples, external library docs
+- **Documentation & References**: Use document-specialist agents via BACKGROUND TASKS for API references, examples, external library docs
 - **Planning & Strategy**: NEVER plan yourself - ALWAYS spawn a dedicated planning agent for work breakdown
 - **High-IQ Reasoning**: Leverage specialized agents for architecture decisions, code review, strategic planning
 - **Frontend/UI Tasks**: Delegate to UI-specialized agents for design and implementation
@@ -105,13 +119,13 @@ TELL THE USER WHAT AGENTS YOU WILL LEVERAGE NOW TO SATISFY USER'S REQUEST.
 ## EXECUTION RULES
 - **TODO**: Track EVERY step. Mark complete IMMEDIATELY after each.
 - **PARALLEL**: Fire independent agent calls simultaneously via Task(run_in_background=true) - NEVER wait sequentially.
-- **BACKGROUND FIRST**: Use Task tool for exploration/research agents (10+ concurrent if needed).
+- **BACKGROUND FIRST**: Use Task tool for exploration/document-specialist agents (10+ concurrent if needed).
 - **VERIFY**: Re-read request after completion. Check ALL requirements met before reporting done.
 - **DELEGATE**: Don't do everything yourself - orchestrate specialized agents for their strengths.
 
 ## WORKFLOW
 1. Analyze the request and identify required capabilities
-2. Spawn exploration/researcher agents via Task(run_in_background=true) in PARALLEL (10+ if needed)
+2. Spawn exploration/document-specialist agents via Task(run_in_background=true) in PARALLEL (10+ if needed)
 3. Always Use Plan agent with gathered context to create detailed work breakdown
 4. Execute with continuous verification against original requirements
 
@@ -208,7 +222,7 @@ Use your extended thinking capabilities to provide the most thorough and well-re
 export const SEARCH_MESSAGE = `<search-mode>
 MAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:
 - explore agents (codebase patterns, file structures)
-- researcher agents (remote repos, official docs, GitHub examples)
+- document-specialist agents (remote repos, official docs, GitHub examples)
 Plus direct tools: Grep, Glob
 NEVER stop at first result - be exhaustive.
 </search-mode>
@@ -226,7 +240,7 @@ ANALYSIS MODE. Gather context before diving deep:
 
 CONTEXT GATHERING (parallel):
 - 1-2 explore agents (codebase patterns, implementations)
-- 1-2 researcher agents (if external library involved)
+- 1-2 document-specialist agents (if external library involved)
 - Direct tools: Grep, Glob, LSP for targeted searches
 
 IF COMPLEX (architecture, multi-system, debugging after 2+ failures):

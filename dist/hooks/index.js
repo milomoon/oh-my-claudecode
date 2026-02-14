@@ -67,8 +67,8 @@ export {
 // Background Notification
 createBackgroundNotificationHook, processBackgroundNotification, processBackgroundNotificationHook, checkBackgroundNotifications, handleBackgroundEvent, HOOK_NAME as BACKGROUND_NOTIFICATION_HOOK_NAME } from './background-notification/index.js';
 export { 
-// Directory README Injector
-createDirectoryReadmeInjectorHook, getReadmesForPath, loadInjectedPaths, saveInjectedPaths, clearInjectedPaths, README_INJECTOR_STORAGE, README_FILENAME, TRACKED_TOOLS as README_TRACKED_TOOLS } from './directory-readme-injector/index.js';
+// Directory README / AGENTS.md Injector
+createDirectoryReadmeInjectorHook, getReadmesForPath, loadInjectedPaths, saveInjectedPaths, clearInjectedPaths, README_INJECTOR_STORAGE, README_FILENAME, AGENTS_FILENAME, CONTEXT_FILENAMES, TRACKED_TOOLS as README_TRACKED_TOOLS } from './directory-readme-injector/index.js';
 export { 
 // Empty Message Sanitizer
 createEmptyMessageSanitizerHook, sanitizeMessages, sanitizeMessage, hasTextContent, isToolPart, hasValidContent, PLACEHOLDER_TEXT, TOOL_PART_TYPES, HOOK_NAME as EMPTY_MESSAGE_SANITIZER_HOOK_NAME, DEBUG_PREFIX as EMPTY_MESSAGE_SANITIZER_DEBUG_PREFIX, ERROR_PATTERNS as EMPTY_MESSAGE_SANITIZER_ERROR_PATTERNS } from './empty-message-sanitizer/index.js';
@@ -105,7 +105,7 @@ createLearnedSkillsHook, processMessageForSkills, isLearnerEnabled, getAllSkills
 // Constants
 USER_SKILLS_DIR, PROJECT_SKILLS_SUBDIR, SKILL_EXTENSION, FEATURE_FLAG_KEY, MAX_SKILL_CONTENT_LENGTH, MIN_QUALITY_SCORE, MAX_SKILLS_PER_SESSION } from './learner/index.js';
 // Autopilot
-export { readAutopilotState, writeAutopilotState, clearAutopilotState, isAutopilotActive, initAutopilot, transitionPhase, incrementAgentCount, updateExpansion, updatePlanning, updateExecution, updateQA, updateValidation, ensureAutopilotDir, getSpecPath, getPlanPath, transitionRalphToUltraQA, transitionUltraQAToValidation, transitionToComplete, transitionToFailed, getTransitionPrompt, getExpansionPrompt, getDirectPlanningPrompt, getExecutionPrompt, getQAPrompt, getValidationPrompt, getPhasePrompt, recordValidationVerdict, getValidationStatus, startValidationRound, shouldRetryValidation, getIssuesToFix, getValidationSpawnPrompt, formatValidationResults, generateSummary, formatSummary, formatCompactSummary, formatFailureSummary, formatFileList, cancelAutopilot, clearAutopilot, canResumeAutopilot, resumeAutopilot, formatCancelMessage, DEFAULT_CONFIG } from './autopilot/index.js';
+export { readAutopilotState, writeAutopilotState, clearAutopilotState, isAutopilotActive, getAutopilotStateAge, initAutopilot, transitionPhase, incrementAgentCount, updateExpansion, updatePlanning, updateExecution, updateQA, updateValidation, ensureAutopilotDir, getSpecPath, getPlanPath, transitionRalphToUltraQA, transitionUltraQAToValidation, transitionToComplete, transitionToFailed, getTransitionPrompt, getExpansionPrompt, getDirectPlanningPrompt, getExecutionPrompt, getQAPrompt, getValidationPrompt, getPhasePrompt, recordValidationVerdict, getValidationStatus, startValidationRound, shouldRetryValidation, getIssuesToFix, getValidationSpawnPrompt, formatValidationResults, generateSummary, formatSummary, formatCompactSummary, formatFailureSummary, formatFileList, cancelAutopilot, clearAutopilot, canResumeAutopilot, resumeAutopilot, formatCancelMessage, STALE_STATE_MAX_AGE_MS, DEFAULT_CONFIG } from './autopilot/index.js';
 export { 
 // Ultrapilot Coordinator
 startUltrapilot, decomposeTask, spawnWorkers, trackProgress, integrateResults, handleSharedFiles, isFileOwnedByWorker, isSharedFile, assignFileToWorker, readUltrapilotState, writeUltrapilotState, initUltrapilot, addWorker, updateWorkerState, completeWorker, failWorker, completeUltrapilot, getCompletedWorkers, getRunningWorkers, getFailedWorkers, recordConflict, DEFAULT_CONFIG as ULTRAPILOT_DEFAULT_CONFIG } from './ultrapilot/index.js';
@@ -115,7 +115,7 @@ export { MODE_CONFIGS, getStateDir, ensureStateDir as ensureModeStateDir, getSta
 isModeActive, getActiveExclusiveMode, canStartMode, getAllModeStatuses, createModeMarker, removeModeMarker, readModeMarker } from './mode-registry/index.js';
 export { 
 // Setup Hook
-ensureDirectoryStructure, validateConfigFiles, setEnvironmentVariables, processSetupInit, pruneOldStateFiles, cleanupOrphanedState, vacuumSwarmDb, processSetupMaintenance, processSetup } from './setup/index.js';
+ensureDirectoryStructure, validateConfigFiles, setEnvironmentVariables, processSetupInit, pruneOldStateFiles, cleanupOrphanedState, processSetupMaintenance, processSetup } from './setup/index.js';
 export { 
 // Beads Context
 getBeadsInstructions, getBeadsContextConfig, registerBeadsContext, clearBeadsContext, BEADS_INSTRUCTIONS, BEADS_RUST_INSTRUCTIONS } from './beads-context/index.js';

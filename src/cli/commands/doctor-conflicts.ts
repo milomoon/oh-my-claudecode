@@ -4,8 +4,9 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
+import { getClaudeConfigDir } from '../../utils/paths.js';
+import { isOmcHook } from '../../installer/index.js';
 import type { PluginConfig } from '../../shared/types.js';
 import { colors } from '../utils/formatting.js';
 
@@ -22,7 +23,7 @@ export interface ConflictReport {
  */
 export function checkHookConflicts(): ConflictReport['hookConflicts'] {
   const conflicts: ConflictReport['hookConflicts'] = [];
-  const settingsPath = join(homedir(), '.claude', 'settings.json');
+  const settingsPath = join(getClaudeConfigDir(), 'settings.json');
 
   if (!existsSync(settingsPath)) {
     return conflicts;
@@ -49,9 +50,7 @@ export function checkHookConflicts(): ConflictReport['hookConflicts'] {
           if (!group.hooks || !Array.isArray(group.hooks)) continue;
           for (const hook of group.hooks) {
             if (hook.type === 'command' && hook.command) {
-              const lowerCmd = hook.command.toLowerCase();
-              const isOmc = lowerCmd.includes('omc') || lowerCmd.includes('oh-my-claudecode');
-              conflicts.push({ event, command: hook.command, isOmc });
+              conflicts.push({ event, command: hook.command, isOmc: isOmcHook(hook.command) });
             }
           }
         }
@@ -68,7 +67,7 @@ export function checkHookConflicts(): ConflictReport['hookConflicts'] {
  * Check CLAUDE.md for OMC markers and user content
  */
 export function checkClaudeMdStatus(): ConflictReport['claudeMdStatus'] {
-  const claudeMdPath = join(homedir(), '.claude', 'CLAUDE.md');
+  const claudeMdPath = join(getClaudeConfigDir(), 'CLAUDE.md');
 
   if (!existsSync(claudeMdPath)) {
     return null;
@@ -125,7 +124,7 @@ export function checkEnvFlags(): ConflictReport['envFlags'] {
  */
 export function checkConfigIssues(): ConflictReport['configIssues'] {
   const unknownFields: string[] = [];
-  const configPath = join(homedir(), '.claude', '.omc-config.json');
+  const configPath = join(getClaudeConfigDir(), '.omc-config.json');
 
   if (!existsSync(configPath)) {
     return { unknownFields };
@@ -143,7 +142,7 @@ export function checkConfigIssues(): ConflictReport['configIssues'] {
       'permissions',
       'magicKeywords',
       'routing',
-      // SisyphusConfig fields (from auto-update.ts / omc-setup)
+      // OMCConfig fields (from auto-update.ts / omc-setup)
       'silentAutoUpdate',
       'configuredAt',
       'configVersion',
@@ -154,6 +153,9 @@ export function checkConfigIssues(): ConflictReport['configIssues'] {
       'ecomode',
       'setupCompleted',
       'setupVersion',
+      'stopHookCallbacks',
+      'notifications',
+      'autoUpgradePrompt',
     ]);
 
     for (const field of Object.keys(config)) {

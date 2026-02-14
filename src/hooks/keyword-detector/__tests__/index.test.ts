@@ -14,10 +14,14 @@ import {
 // Mock isEcomodeEnabled
 vi.mock('../../../features/auto-update.js', () => ({
   isEcomodeEnabled: vi.fn(() => true),
+  isTeamEnabled: vi.fn(() => true),
 }));
 
 import { isEcomodeEnabled } from '../../../features/auto-update.js';
 const mockedIsEcomodeEnabled = vi.mocked(isEcomodeEnabled);
+
+import { isTeamEnabled } from '../../../features/auto-update.js';
+const mockedIsTeamEnabled = vi.mocked(isTeamEnabled);
 
 describe('keyword-detector', () => {
   describe('removeCodeBlocks', () => {
@@ -109,6 +113,51 @@ World`);
     it('should preserve normal text', () => {
       const result = sanitizeForKeywordDetection('ask codex to review');
       expect(result).toContain('ask codex');
+    });
+
+    it('should not over-strip when XML tag names differ', () => {
+      // Mismatched tags should not strip content between them
+      const result = sanitizeForKeywordDetection('<open>ralph</close> hello');
+      expect(result).toContain('ralph');
+    });
+
+    it('should strip matching XML tags correctly', () => {
+      const result = sanitizeForKeywordDetection('<div>ralph</div> hello');
+      expect(result).not.toContain('ralph');
+      expect(result).toContain('hello');
+    });
+
+    it('should strip nested matching XML tags', () => {
+      const result = sanitizeForKeywordDetection('<outer>some <inner>text</inner> ralph</outer> visible');
+      expect(result).not.toContain('ralph');
+      expect(result).toContain('visible');
+    });
+
+    it('should strip absolute file paths starting with /', () => {
+      const result = sanitizeForKeywordDetection('open /usr/local/bin/codex');
+      expect(result).not.toContain('codex');
+    });
+
+    it('should strip relative file paths starting with ./', () => {
+      const result = sanitizeForKeywordDetection('edit ./src/codex.ts');
+      expect(result).not.toContain('codex');
+    });
+
+    it('should strip multi-segment file paths', () => {
+      const result = sanitizeForKeywordDetection('open src/mcp/codex-core.ts');
+      expect(result).not.toContain('codex');
+    });
+
+    it('should NOT strip standalone words that look like single segments', () => {
+      // "ask codex" should not be stripped since "codex" is not a path
+      const result = sanitizeForKeywordDetection('ask codex to review');
+      expect(result).toContain('ask codex');
+    });
+
+    it('should NOT strip slash-less words with dots', () => {
+      // "file.txt" alone (no path separator) should be kept
+      const result = sanitizeForKeywordDetection('rename codex.config');
+      expect(result).toContain('codex');
     });
   });
 
@@ -396,10 +445,22 @@ World`);
     });
 
     describe('ecomode keyword', () => {
-      it('should detect eco keyword', () => {
+      it('should NOT detect bare eco keyword', () => {
         const result = detectKeywordsWithType('eco fix all errors');
         const ecoMatch = result.find((r) => r.type === 'ecomode');
-        expect(ecoMatch).toBeDefined();
+        expect(ecoMatch).toBeUndefined();
+      });
+
+      it('should NOT detect budget keyword', () => {
+        const result = detectKeywordsWithType('budget fix all errors');
+        const ecoMatch = result.find((r) => r.type === 'ecomode');
+        expect(ecoMatch).toBeUndefined();
+      });
+
+      it('should NOT detect efficient keyword', () => {
+        const result = detectKeywordsWithType('efficient fix all errors');
+        const ecoMatch = result.find((r) => r.type === 'ecomode');
+        expect(ecoMatch).toBeUndefined();
       });
 
       it('should detect ecomode keyword', () => {
@@ -408,14 +469,20 @@ World`);
         expect(ecoMatch).toBeDefined();
       });
 
-      it('should detect save-tokens keyword', () => {
-        const result = detectKeywordsWithType('save-tokens and fix errors');
+      it('should detect eco-mode keyword', () => {
+        const result = detectKeywordsWithType('eco-mode fix build');
         const ecoMatch = result.find((r) => r.type === 'ecomode');
         expect(ecoMatch).toBeDefined();
       });
 
-      it('should detect budget keyword', () => {
-        const result = detectKeywordsWithType('budget fix all errors');
+      it('should detect eco mode keyword', () => {
+        const result = detectKeywordsWithType('eco mode fix build');
+        const ecoMatch = result.find((r) => r.type === 'ecomode');
+        expect(ecoMatch).toBeDefined();
+      });
+
+      it('should detect save-tokens keyword', () => {
+        const result = detectKeywordsWithType('save-tokens and fix errors');
         const ecoMatch = result.find((r) => r.type === 'ecomode');
         expect(ecoMatch).toBeDefined();
       });
@@ -429,20 +496,20 @@ World`);
           mockedIsEcomodeEnabled.mockReturnValue(true);
         });
 
-        it('should NOT detect eco keyword when disabled', () => {
-          const result = detectKeywordsWithType('eco fix all errors');
-          const ecoMatch = result.find((r) => r.type === 'ecomode');
-          expect(ecoMatch).toBeUndefined();
-        });
-
         it('should NOT detect ecomode keyword when disabled', () => {
           const result = detectKeywordsWithType('ecomode fix build');
           const ecoMatch = result.find((r) => r.type === 'ecomode');
           expect(ecoMatch).toBeUndefined();
         });
 
+        it('should NOT detect eco-mode keyword when disabled', () => {
+          const result = detectKeywordsWithType('eco-mode fix build');
+          const ecoMatch = result.find((r) => r.type === 'ecomode');
+          expect(ecoMatch).toBeUndefined();
+        });
+
         it('should still detect ultrawork when ecomode is disabled', () => {
-          const result = detectKeywordsWithType('ulw eco fix errors');
+          const result = detectKeywordsWithType('ulw ecomode fix errors');
           const ultraworkMatch = result.find((r) => r.type === 'ultrawork');
           expect(ultraworkMatch).toBeDefined();
           const ecoMatch = result.find((r) => r.type === 'ecomode');
@@ -450,7 +517,7 @@ World`);
         });
 
         it('should not suppress ultrawork when ecomode disabled and both keywords present', () => {
-          const result = getAllKeywords('ulw eco fix errors');
+          const result = getAllKeywords('ulw ecomode fix errors');
           expect(result).toContain('ultrawork');
           expect(result).not.toContain('ecomode');
         });
@@ -702,13 +769,13 @@ World`);
     describe('multiple keyword conflict resolution', () => {
       it('should return ecomode over ultrawork when both present', () => {
         // ecomode wins over ultrawork per conflict resolution rules
-        const result = getPrimaryKeyword('ulw eco fix errors');
+        const result = getPrimaryKeyword('ulw ecomode fix errors');
         expect(result?.type).toBe('ecomode');
       });
 
       it('should return ecomode over ultrawork (ecomode has higher priority)', () => {
         // UPDATED: ecomode wins per conflict resolution
-        const result = getPrimaryKeyword('eco ultrawork fix errors');
+        const result = getPrimaryKeyword('ecomode ultrawork fix errors');
         expect(result?.type).toBe('ecomode');
       });
 
@@ -718,12 +785,12 @@ World`);
       });
 
       it('should return ralph over ultrawork and ecomode', () => {
-        const result = getPrimaryKeyword('ralph ulw eco fix errors');
+        const result = getPrimaryKeyword('ralph ulw ecomode fix errors');
         expect(result?.type).toBe('ralph');
       });
 
       it('should detect all keywords even when multiple present', () => {
-        const result = detectKeywordsWithType('ulw eco fix errors');
+        const result = detectKeywordsWithType('ulw ecomode fix errors');
         const types = result.map(r => r.type);
         expect(types).toContain('ultrawork');
         expect(types).toContain('ecomode');
@@ -775,15 +842,21 @@ World`);
     });
 
     it('should return ecomode over ultrawork when both present', () => {
-      expect(getAllKeywords('ulw eco fix errors')).toEqual(['ecomode']);
+      expect(getAllKeywords('ulw ecomode fix errors')).toEqual(['ecomode']);
     });
 
-    it('should return team over autopilot when legacy ultrapilot trigger is present', () => {
-      expect(getAllKeywords('autopilot ultrapilot build')).toEqual(['team']);
+    it('should return team and ultrapilot when legacy ultrapilot trigger is present', () => {
+      const result = getAllKeywords('autopilot ultrapilot build');
+      expect(result).toContain('ultrapilot');
+      expect(result).toContain('team');
+      // team beats autopilot, but original ultrapilot is preserved
+      expect(result).not.toContain('autopilot');
     });
 
-    it('should return team for legacy swarm trigger', () => {
-      expect(getAllKeywords('swarm 5 agents build this')).toEqual(['team']);
+    it('should return team and swarm for legacy swarm trigger', () => {
+      const result = getAllKeywords('swarm 5 agents build this');
+      expect(result).toContain('swarm');
+      expect(result).toContain('team');
     });
 
     it('should return ralph with ultrawork (not mutually exclusive)', () => {
@@ -793,7 +866,7 @@ World`);
     });
 
     it('should return ralph with ecomode but not ultrawork', () => {
-      const result = getAllKeywords('ralph eco ulw fix');
+      const result = getAllKeywords('ralph ecomode ulw fix');
       expect(result).toContain('ralph');
       expect(result).toContain('ecomode');
       expect(result).not.toContain('ultrawork');
@@ -829,10 +902,145 @@ World`);
     });
 
     it('should handle multiple combinable keywords', () => {
-      const result = getAllKeywords('ralph tdd research fix');
+      const result = getAllKeywords('ralph tdd fix');
       expect(result).toContain('ralph');
       expect(result).toContain('tdd');
-      expect(result).toContain('research');
+    });
+
+    // Team + Ralph composition tests
+    it('should return both ralph and team when both present (linked mode)', () => {
+      const result = getAllKeywords('team ralph build the API');
+      expect(result).toContain('ralph');
+      expect(result).toContain('team');
+    });
+
+    it('should return ralph before team in priority order', () => {
+      const result = getAllKeywords('team ralph build the API');
+      const ralphIdx = result.indexOf('ralph');
+      const teamIdx = result.indexOf('team');
+      expect(ralphIdx).toBeLessThan(teamIdx);
+    });
+
+    it('should return ralph as primary when team ralph is used', () => {
+      const primary = getPrimaryKeyword('team ralph build the API');
+      expect(primary?.type).toBe('ralph');
+    });
+
+    it('should return team and ralph with other keywords', () => {
+      const result = getAllKeywords('team ralph ask codex to review');
+      expect(result).toContain('ralph');
+      expect(result).toContain('team');
+      expect(result).toContain('codex');
+    });
+
+    it('should return team over autopilot even with ralph', () => {
+      const result = getAllKeywords('ralph team autopilot build');
+      expect(result).toContain('ralph');
+      expect(result).toContain('team');
+      expect(result).not.toContain('autopilot');
+    });
+
+    // Team keyword false positive prevention (intent-gated regex)
+    it('should not detect team in "my team uses X"', () => {
+      const result = getAllKeywords('my team uses React for frontend');
+      expect(result).not.toContain('team');
+    });
+
+    it('should not detect team in "the team needs help"', () => {
+      const result = getAllKeywords('the team needs help with deployment');
+      expect(result).not.toContain('team');
+    });
+
+    it('should not detect team in "our team decided"', () => {
+      const result = getAllKeywords('our team decided to use TypeScript');
+      expect(result).not.toContain('team');
+    });
+
+    it('should not detect team in "a team of engineers"', () => {
+      const result = getAllKeywords('a team of engineers built this');
+      expect(result).not.toContain('team');
+    });
+
+    it('should detect team via coordinated team phrase', () => {
+      const result = getAllKeywords('coordinated team build the API');
+      expect(result).toContain('team');
+    });
+
+    it('should detect team via ultrapilot legacy keyword and preserve ultrapilot', () => {
+      const result = getAllKeywords('ultrapilot build all components');
+      expect(result).toContain('team');
+      expect(result).toContain('ultrapilot');
+    });
+
+    it('should detect team via swarm N agents pattern and preserve swarm', () => {
+      const result = getAllKeywords('swarm 5 agents fix all errors');
+      expect(result).toContain('team');
+      expect(result).toContain('swarm');
+    });
+
+    // Mixed keyword precedence tests
+    it('should handle team + ecomode + ralph combination', () => {
+      const result = getAllKeywords('team ralph ecomode build the app');
+      expect(result).toContain('ralph');
+      expect(result).toContain('team');
+      expect(result).toContain('ecomode');
+    });
+
+    it('should not detect cancel alongside team', () => {
+      const result = getAllKeywords('cancelomc team');
+      expect(result).toEqual(['cancel']);
+      expect(result).not.toContain('team');
+    });
+
+    // Dedup regression test
+    it('should deduplicate repeated keyword triggers', () => {
+      const result = getAllKeywords('autopilot autopilot fix errors');
+      const autopilotCount = result.filter(k => k === 'autopilot').length;
+      expect(autopilotCount).toBe(1);
+    });
+
+    describe('when team is disabled via config', () => {
+      beforeEach(() => {
+        mockedIsTeamEnabled.mockReturnValue(false);
+      });
+
+      afterEach(() => {
+        mockedIsTeamEnabled.mockReturnValue(true);
+      });
+
+      it('should NOT detect team keyword when disabled', () => {
+        const result = getAllKeywords('team build the API');
+        expect(result).not.toContain('team');
+      });
+
+      it('should NOT detect coordinated team when disabled', () => {
+        const result = getAllKeywords('coordinated team build');
+        expect(result).not.toContain('team');
+      });
+
+      it('should NOT detect ultrapilot or team when disabled', () => {
+        const result = getAllKeywords('ultrapilot build all');
+        expect(result).not.toContain('team');
+        expect(result).not.toContain('ultrapilot');
+      });
+
+      it('should NOT detect swarm or team when disabled', () => {
+        const result = getAllKeywords('swarm 5 agents fix errors');
+        expect(result).not.toContain('team');
+        expect(result).not.toContain('swarm');
+      });
+
+      it('should still detect other keywords when team disabled', () => {
+        const result = getAllKeywords('team ralph build the API');
+        expect(result).toContain('ralph');
+        expect(result).not.toContain('team');
+      });
+
+      it('should not suppress autopilot when team is disabled', () => {
+        const result = getAllKeywords('team autopilot build');
+        expect(result).toContain('autopilot');
+        expect(result).not.toContain('team');
+      });
     });
   });
 });

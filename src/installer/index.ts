@@ -20,9 +20,10 @@ import {
   MIN_NODE_VERSION
 } from './hooks.js';
 import { getRuntimePackageVersion } from '../lib/version.js';
+import { getConfigDir } from '../utils/config-dir.js';
 
 /** Claude Code configuration directory */
-export const CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+export const CLAUDE_CONFIG_DIR = getConfigDir();
 export const AGENTS_DIR = join(CLAUDE_CONFIG_DIR, 'agents');
 export const COMMANDS_DIR = join(CLAUDE_CONFIG_DIR, 'commands');
 export const SKILLS_DIR = join(CLAUDE_CONFIG_DIR, 'skills');
@@ -84,32 +85,92 @@ export interface InstallResult {
 /** Installation options */
 export interface InstallOptions {
   force?: boolean;
+  version?: string;
   verbose?: boolean;
   skipClaudeCheck?: boolean;
   forceHooks?: boolean;
   refreshHooksInPlugin?: boolean;
+  skipHud?: boolean;
 }
+
+/**
+ * Read hudEnabled from .omc-config.json without importing auto-update
+ * (avoids circular dependency since auto-update imports from installer)
+ */
+export function isHudEnabledInConfig(): boolean {
+  const configPath = join(CLAUDE_CONFIG_DIR, '.omc-config.json');
+  if (!existsSync(configPath)) {
+    return true; // default: enabled
+  }
+  try {
+    const content = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(content);
+    // Only disable if explicitly set to false
+    return config.hudEnabled !== false;
+  } catch {
+    return true; // default: enabled on parse error
+  }
+}
+
+/**
+ * Detect whether a statusLine config belongs to oh-my-claudecode.
+ *
+ * Checks the command string for known OMC HUD paths so that custom
+ * (non-OMC) statusLine configurations are preserved during forced
+ * updates/reconciliation.
+ *
+ * @param statusLine - The statusLine setting object from settings.json
+ * @returns true if the statusLine was set by OMC
+ */
+export function isOmcStatusLine(statusLine: unknown): boolean {
+  if (!statusLine || typeof statusLine !== 'object') return false;
+  const sl = statusLine as Record<string, unknown>;
+  if (typeof sl.command !== 'string') return false;
+  return sl.command.includes('omc-hud');
+}
+
+/**
+ * Known OMC hook script filenames installed into .claude/hooks/.
+ * Must be kept in sync with getHookScripts() in hooks.ts and
+ * HOOKS_SETTINGS_CONFIG_NODE command entries.
+ */
+const OMC_HOOK_FILENAMES = new Set([
+  'keyword-detector.mjs',
+  'session-start.mjs',
+  'pre-tool-use.mjs',
+  'post-tool-use.mjs',
+  'post-tool-use-failure.mjs',
+  'persistent-mode.mjs',
+  'stop-continuation.mjs',
+]);
 
 /**
  * Detect whether a hook command belongs to oh-my-claudecode.
  *
- * Uses substring matching rather than word-boundary regex.
- * Rationale: Real OMC hooks use compound names where "omc" is embedded
- * (e.g., `omc-pre-tool-use.mjs`, `oh-my-claudecode-hook.mjs`). A word-boundary
- * regex like /\bomc\b/ would fail to match "oh-my-claudecode" since "omc" appears
- * as an interior substring. The theoretical false positives (words containing "omc"
- * like "atomic", "socom") are extremely unlikely in real hook command paths.
+ * Recognition strategy (any match is sufficient):
+ * 1. Command path contains "omc" as a path/word segment (e.g. `omc-hook.mjs`, `/omc/`)
+ * 2. Command path contains "oh-my-claudecode"
+ * 3. Command references a known OMC hook filename inside .claude/hooks/
  *
  * @param command - The hook command string
- * @returns true if the command contains 'omc' or 'oh-my-claudecode'
+ * @returns true if the command belongs to OMC
  */
 export function isOmcHook(command: string): boolean {
   const lowerCommand = command.toLowerCase();
-  // Match on path segments or word boundaries, not substrings
+  // Match "omc" as a path segment or word boundary
   // Matches: /omc/, /omc-, omc/, -omc, _omc, omc_
   const omcPattern = /(?:^|[\/\\_-])omc(?:$|[\/\\_-])/;
   const fullNamePattern = /oh-my-claudecode/;
-  return omcPattern.test(lowerCommand) || fullNamePattern.test(lowerCommand);
+  if (omcPattern.test(lowerCommand) || fullNamePattern.test(lowerCommand)) {
+    return true;
+  }
+  // Check for known OMC hook filenames in .claude/hooks/ path.
+  // Handles both Unix (.claude/hooks/) and Windows (.claude\hooks\) paths.
+  const hookPathMatch = lowerCommand.match(/\.claude[/\\]hooks[/\\]([a-z0-9-]+\.mjs)/);
+  if (hookPathMatch && OMC_HOOK_FILENAMES.has(hookPathMatch[1])) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -174,7 +235,7 @@ export function isProjectScopedPlugin(): boolean {
   }
 
   // Global plugins are installed under ~/.claude/plugins/
-  const globalPluginBase = join(homedir(), '.claude', 'plugins');
+  const globalPluginBase = join(CLAUDE_CONFIG_DIR, 'plugins');
 
   // If the plugin root is NOT under the global plugin directory, it's project-scoped
   // Normalize paths for comparison (resolve symlinks, trailing slashes, etc.)
@@ -185,14 +246,28 @@ export function isProjectScopedPlugin(): boolean {
 }
 
 /**
- * Get the package root directory
- * From dist/installer/index.js, go up to package root
+ * Get the package root directory.
+ * Works for both ESM (dist/installer/) and CJS bundles (bridge/).
+ * When esbuild bundles to CJS, import.meta is replaced with {} so we
+ * fall back to __dirname which is natively available in CJS.
  */
 function getPackageDir(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // From dist/installer/index.js, go up to package root
-  return join(__dirname, '..', '..');
+  try {
+    if (import.meta?.url) {
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = dirname(__filename);
+      // From dist/installer/index.js, go up to package root
+      return join(__dirname, '..', '..');
+    }
+  } catch {
+    // import.meta.url unavailable — fall through to CJS path
+  }
+  // CJS bundle path: from bridge/ go up 1 level to package root
+  // eslint-disable-next-line no-undef
+  if (typeof __dirname !== 'undefined') {
+    return join(__dirname, '..');
+  }
+  return process.cwd();
 }
 
 /**
@@ -218,16 +293,19 @@ function loadAgentDefinitions(): Record<string, string> {
 
 /**
  * Load command definitions from /commands/*.md files
+ *
+ * NOTE: The commands/ directory was removed in v4.1.16 (#582).
+ * All commands are now plugin-scoped skills. This function returns
+ * an empty object for backward compatibility.
  */
 function loadCommandDefinitions(): Record<string, string> {
   const commandsDir = join(getPackageDir(), 'commands');
-  const definitions: Record<string, string> = {};
 
   if (!existsSync(commandsDir)) {
-    console.error(`FATAL: commands directory not found: ${commandsDir}`);
-    process.exit(1);
+    return {};
   }
 
+  const definitions: Record<string, string> = {};
   for (const file of readdirSync(commandsDir)) {
     if (file.endsWith('.md')) {
       definitions[file] = readFileSync(join(commandsDir, file), 'utf-8');
@@ -381,9 +459,7 @@ export function install(options: InstallOptions = {}): InstallResult {
       if (!existsSync(AGENTS_DIR)) {
         mkdirSync(AGENTS_DIR, { recursive: true });
       }
-      if (!existsSync(COMMANDS_DIR)) {
-        mkdirSync(COMMANDS_DIR, { recursive: true });
-      }
+      // NOTE: COMMANDS_DIR creation removed - commands/ deprecated in v4.1.16 (#582)
       if (!existsSync(SKILLS_DIR)) {
         mkdirSync(SKILLS_DIR, { recursive: true });
       }
@@ -463,7 +539,7 @@ export function install(options: InstallOptions = {}): InstallResult {
         }
 
         // Merge OMC content with existing content
-        const mergedContent = mergeClaudeMd(existingContent, omcContent, VERSION);
+        const mergedContent = mergeClaudeMd(existingContent, omcContent, options.version ?? VERSION);
         writeFileSync(claudeMdPath, mergedContent);
 
         if (existingContent) {
@@ -523,15 +599,21 @@ export function install(options: InstallOptions = {}): InstallResult {
       log('Skipping agent/command/hook files (managed by plugin system)');
     }
 
-    // Install HUD statusline (skip for project-scoped plugins to avoid affecting global settings)
-    // Project-scoped plugins should not modify ~/.claude/settings.json
+    // Install HUD statusline (skip for project-scoped plugins, skipHud option, or hudEnabled config)
     let hudScriptPath: string | null = null;
+    const hudDisabledByOption = options.skipHud === true;
+    const hudDisabledByConfig = !isHudEnabledInConfig();
+    const skipHud = projectScoped || hudDisabledByOption || hudDisabledByConfig;
     if (projectScoped) {
       log('Skipping HUD statusline (project-scoped plugin should not modify global settings)');
+    } else if (hudDisabledByOption) {
+      log('Skipping HUD statusline (user opted out)');
+    } else if (hudDisabledByConfig) {
+      log('Skipping HUD statusline (hudEnabled is false in .omc-config.json)');
     } else {
       log('Installing HUD statusline...');
     }
-    if (!projectScoped) try {
+    if (!skipHud) try {
       if (!existsSync(HUD_DIR)) {
         mkdirSync(HUD_DIR, { recursive: true });
       }
@@ -707,12 +789,14 @@ export function install(options: InstallOptions = {}): InstallResult {
             command: 'node ' + hudScriptPath
           };
           log('  Configured statusLine');
-        } else if (options.force) {
+        } else if (options.force && isOmcStatusLine(existingSettings.statusLine)) {
           existingSettings.statusLine = {
             type: 'command',
             command: 'node ' + hudScriptPath
           };
           log('  Updated statusLine (--force)');
+        } else if (options.force) {
+          log('  statusLine owned by another tool, preserving (use manual edit to override)');
         } else {
           log('  statusLine already configured, skipping (use --force to override)');
         }
@@ -729,7 +813,7 @@ export function install(options: InstallOptions = {}): InstallResult {
     // Save version metadata (skip for project-scoped plugins)
     if (!projectScoped) {
       const versionMetadata = {
-        version: VERSION,
+        version: options.version ?? VERSION,
         installedAt: new Date().toISOString(),
         installMethod: 'npm' as const,
         lastCheckAt: new Date().toISOString()
@@ -757,7 +841,7 @@ export function install(options: InstallOptions = {}): InstallResult {
  * Check if OMC is already installed
  */
 export function isInstalled(): boolean {
-  return existsSync(VERSION_FILE) && existsSync(AGENTS_DIR) && existsSync(COMMANDS_DIR);
+  return existsSync(VERSION_FILE) && existsSync(AGENTS_DIR);
 }
 
 /**

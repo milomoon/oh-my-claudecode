@@ -8,13 +8,14 @@ describe('Builtin Skills', () => {
   });
 
   describe('createBuiltinSkills()', () => {
-    it('should return correct number of skills (32)', () => {
+    it('should return correct number of skills (41)', () => {
       const skills = createBuiltinSkills();
-      // 32 skills: analyze, autopilot, build-fix, cancel, code-review, deepinit, deepsearch, doctor, ecomode,
-      // frontend-ui-ux, git-master, help, hud, learner, mcp-setup, note,
-      // omc-setup, pipeline, plan, project-session-manager, ralph, release, research,
-      // security-review, skill, tdd, team, trace, ultrapilot, ultraqa, ultrawork, writer-memory
-      expect(skills).toHaveLength(32);
+      // 41 skills: analyze, autopilot, build-fix, cancel, code-review, configure-discord, configure-telegram,
+      // deepinit, deepsearch, omc-doctor, ecomode, external-context, frontend-ui-ux, git-master, omc-help, hud,
+      // learn-about-omc, learner, mcp-setup, note, omc-setup, pipeline, plan, project-session-manager,
+      // psm, ralph, ralph-init, ralplan, release, review, sciomc, security-review, skill, swarm, tdd,
+      // team, trace, ultrapilot, ultraqa, ultrawork, writer-memory
+      expect(skills).toHaveLength(41);
     });
 
     it('should return an array of BuiltinSkill objects', () => {
@@ -69,14 +70,18 @@ describe('Builtin Skills', () => {
         'build-fix',
         'cancel',
         'code-review',
+        'configure-discord',
+        'configure-telegram',
         'deepinit',
         'deepsearch',
-        'doctor',
+        'omc-doctor',
         'ecomode',
+        'external-context',
         'frontend-ui-ux',
         'git-master',
-        'help',
+        'omc-help',
         'hud',
+        'learn-about-omc',
         'learner',
         'mcp-setup',
         'note',
@@ -84,11 +89,16 @@ describe('Builtin Skills', () => {
         'pipeline',
         'plan',
         'project-session-manager',
+        'psm',
         'ralph',
+        'ralph-init',
+        'ralplan',
         'release',
-        'research',
+        'review',
+        'sciomc',
         'security-review',
         'skill',
+        'swarm',
         'tdd',
         'team',
         'trace',
@@ -139,7 +149,7 @@ describe('Builtin Skills', () => {
   describe('listBuiltinSkillNames()', () => {
     it('should return all skill names', () => {
       const names = listBuiltinSkillNames();
-      expect(names).toHaveLength(32);
+      expect(names).toHaveLength(41);
       expect(names).toContain('autopilot');
       expect(names).toContain('cancel');
       expect(names).toContain('ralph');
@@ -151,8 +161,8 @@ describe('Builtin Skills', () => {
       expect(names).toContain('plan');
       expect(names).toContain('deepinit');
       expect(names).toContain('release');
-      expect(names).toContain('doctor');
-      expect(names).toContain('help');
+      expect(names).toContain('omc-doctor');
+      expect(names).toContain('omc-help');
       expect(names).toContain('hud');
       expect(names).toContain('note');
       expect(names).toContain('omc-setup');

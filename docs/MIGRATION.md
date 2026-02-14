@@ -176,7 +176,7 @@ All agent names have been updated from Greek mythology references to intuitive, 
 | mnemosyne | learner |
 | sisyphus-junior | executor |
 | orchestrator-sisyphus | coordinator |
-| librarian | researcher |
+| librarian | document-specialist |
 | frontend-engineer | designer |
 | document-writer | writer |
 | multimodal-looker | vision |
@@ -238,7 +238,7 @@ All 2.x commands continue to work. Here's what changed:
 | `/oh-my-claudecode:frontend-ui-ux` | Say "UI", "styling", "component", "design" | ✅ YES (auto-detect) |
 | `/oh-my-claudecode:note "content"` | Say "remember this" or "save this" | ✅ YES (auto-detect) |
 | `/oh-my-claudecode:cancel-ralph` | Say "stop", "cancel", or "abort" | ✅ YES (auto-detect) |
-| `/oh-my-claudecode:doctor` | Invoke normally | ✅ YES (unchanged) |
+| `/oh-my-claudecode:omc-doctor` | Invoke normally | ✅ YES (unchanged) |
 | All other commands | Work exactly as before | ✅ YES |
 
 ### Magic Keywords
@@ -375,7 +375,7 @@ After migration, verify your setup:
    ```
 
 3. **Test a simple command**:
-   Run `/oh-my-claudecode:help` in Claude Code to ensure the plugin is loaded correctly.
+   Run `/oh-my-claudecode:omc-help` in Claude Code to ensure the plugin is loaded correctly.
 
 ### New Features in 3.0
 
@@ -614,7 +614,7 @@ Chain agents with data passing between stages:
 - `review` - explore → architect → critic → executor
 - `implement` - planner → executor → tdd-guide
 - `debug` - explore → architect → build-fixer
-- `research` - parallel(researcher, explore) → architect → writer
+- `research` - parallel(document-specialist, explore) → architect → writer
 - `refactor` - explore → architect-medium → executor-high → qa-tester
 - `security` - explore → security-reviewer → executor → security-reviewer-low
 
@@ -948,8 +948,8 @@ A: Keywords are explicit shortcuts. Natural language triggers auto-detection. Bo
 
 ## Need Help?
 
-- **Diagnose issues**: Run `/oh-my-claudecode:doctor`
-- **See all commands**: Run `/oh-my-claudecode:help`
+- **Diagnose issues**: Run `/oh-my-claudecode:omc-doctor`
+- **See all commands**: Run `/oh-my-claudecode:omc-help`
 - **View real-time status**: Run `/oh-my-claudecode:hud setup`
 - **Review detailed changelog**: See [CHANGELOG.md](../CHANGELOG.md)
 - **Report bugs**: [GitHub Issues](https://github.com/Yeachan-Heo/oh-my-claude-sisyphus/issues)

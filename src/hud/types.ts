@@ -27,6 +27,10 @@ export interface BackgroundTask {
 export interface OmcHudState {
   timestamp: string;
   backgroundTasks: BackgroundTask[];
+  /** Persisted session start time to survive tail-parsing resets */
+  sessionStartTimestamp?: string;
+  /** Session ID that owns the persisted sessionStartTimestamp */
+  sessionId?: string;
 }
 
 // ============================================================================
@@ -151,8 +155,8 @@ export interface PrdStateForHud {
 export interface RateLimits {
   /** 5-hour rolling window usage percentage (0-100) - all models combined */
   fiveHourPercent: number;
-  /** Weekly usage percentage (0-100) - all models combined */
-  weeklyPercent: number;
+  /** Weekly usage percentage (0-100) - all models combined (undefined if not applicable) */
+  weeklyPercent?: number;
   /** When the 5-hour limit resets (null if unavailable) */
   fiveHourResetsAt?: Date | null;
   /** When the weekly limit resets (null if unavailable) */
@@ -162,6 +166,16 @@ export interface RateLimits {
   sonnetWeeklyPercent?: number;
   /** Sonnet weekly reset time */
   sonnetWeeklyResetsAt?: Date | null;
+
+  /** Opus-specific weekly usage percentage (0-100), if available from API */
+  opusWeeklyPercent?: number;
+  /** Opus weekly reset time */
+  opusWeeklyResetsAt?: Date | null;
+
+  /** Monthly usage percentage (0-100), if available from API */
+  monthlyPercent?: number;
+  /** When the monthly limit resets (null if unavailable) */
+  monthlyResetsAt?: Date | null;
 }
 
 export interface HudRenderContext {
@@ -209,6 +223,12 @@ export interface HudRenderContext {
 
   /** Session health metrics */
   sessionHealth: SessionHealth | null;
+
+  /** Installed OMC version (e.g. "4.1.10") */
+  omcVersion: string | null;
+
+  /** Latest available version from npm registry (null if up to date or unknown) */
+  updateAvailable: string | null;
 }
 
 // ============================================================================
@@ -246,12 +266,21 @@ export type ThinkingFormat = 'bubble' | 'brain' | 'face' | 'text';
  */
 export type CwdFormat = 'relative' | 'absolute' | 'folder';
 
+/**
+ * Model name format options:
+ * - short: 'Opus', 'Sonnet', 'Haiku'
+ * - versioned: 'Opus 4.6', 'Sonnet 4.5', 'Haiku 4.5'
+ * - full: raw model ID like 'claude-opus-4-6-20260205'
+ */
+export type ModelFormat = 'short' | 'versioned' | 'full';
+
 export interface HudElementConfig {
   cwd: boolean;              // Show working directory
   cwdFormat: CwdFormat;      // Path display format
   gitRepo: boolean;          // Show git repository name
   gitBranch: boolean;        // Show git branch
   model: boolean;            // Show current model name
+  modelFormat: ModelFormat;   // Model name verbosity level
   omcLabel: boolean;
   rateLimits: boolean;  // Show 5h and weekly rate limits
   ralph: boolean;
@@ -290,6 +319,10 @@ export interface HudThresholds {
   contextCritical: number;
   /** Ralph iteration that triggers warning color (default: 7) */
   ralphWarning: number;
+  /** Session cost ($) that triggers budget warning (default: 2.0) */
+  budgetWarning: number;
+  /** Session cost ($) that triggers budget critical alert (default: 5.0) */
+  budgetCritical: number;
 }
 
 export interface HudConfig {
@@ -307,6 +340,7 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
     gitRepo: false,           // Disabled by default for backward compatibility
     gitBranch: false,         // Disabled by default for backward compatibility
     model: false,             // Disabled by default for backward compatibility
+    modelFormat: 'short',     // Short names by default for backward compatibility
     omcLabel: true,
     rateLimits: true,  // Show rate limits by default
     ralph: true,
@@ -336,6 +370,8 @@ export const DEFAULT_HUD_CONFIG: HudConfig = {
     contextCompactSuggestion: 80,
     contextCritical: 85,
     ralphWarning: 7,
+    budgetWarning: 2.0,
+    budgetCritical: 5.0,
   },
   staleTaskThresholdMinutes: 30,
 };
@@ -347,6 +383,7 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
     gitRepo: false,
     gitBranch: false,
     model: false,
+    modelFormat: 'short',
     omcLabel: true,
     rateLimits: true,
     ralph: true,
@@ -376,6 +413,7 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
     gitRepo: false,
     gitBranch: false,
     model: false,
+    modelFormat: 'short',
     omcLabel: false,
     rateLimits: false,
     ralph: false,
@@ -403,8 +441,9 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
     cwd: false,
     cwdFormat: 'relative',
     gitRepo: false,
-    gitBranch: false,
+    gitBranch: true,
     model: false,
+    modelFormat: 'short',
     omcLabel: true,
     rateLimits: true,
     ralph: true,
@@ -431,9 +470,10 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
   full: {
     cwd: false,
     cwdFormat: 'relative',
-    gitRepo: false,
-    gitBranch: false,
+    gitRepo: true,
+    gitBranch: true,
     model: false,
+    modelFormat: 'short',
     omcLabel: true,
     rateLimits: true,
     ralph: true,
@@ -461,8 +501,9 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
     cwd: false,
     cwdFormat: 'relative',
     gitRepo: false,
-    gitBranch: false,
+    gitBranch: true,
     model: false,
+    modelFormat: 'short',
     omcLabel: true,
     rateLimits: false,
     ralph: true,
@@ -489,9 +530,10 @@ export const PRESET_CONFIGS: Record<HudPreset, Partial<HudElementConfig>> = {
   dense: {
     cwd: false,
     cwdFormat: 'relative',
-    gitRepo: false,
-    gitBranch: false,
+    gitRepo: true,
+    gitBranch: true,
     model: false,
+    modelFormat: 'short',
     omcLabel: true,
     rateLimits: true,
     ralph: true,

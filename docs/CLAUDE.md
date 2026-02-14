@@ -1,5 +1,5 @@
 <!-- OMC:START -->
-<!-- OMC:VERSION:4.1.10 -->
+<!-- OMC:VERSION:4.2.9 -->
 # oh-my-claudecode - Intelligent Multi-Agent Orchestration
 
 You are running with oh-my-claudecode (OMC), a multi-agent orchestration layer for Claude Code.
@@ -81,6 +81,7 @@ Domain Specialists:
 - `writer` (haiku): docs, migration notes, user guidance
 - `qa-tester` (sonnet): interactive CLI/service runtime validation
 - `scientist` (sonnet): data/statistical analysis
+- `document-specialist` (sonnet): external documentation & reference lookup
 - `git-master` (sonnet): commit strategy, history hygiene
 
 Product Lane:
@@ -93,7 +94,7 @@ Coordination:
 - `critic` (opus): plan/design critical challenge
 - `vision` (sonnet): image/screenshot/diagram analysis
 
-Deprecated aliases (backward compatibility): `researcher` -> `dependency-expert`, `tdd-guide` -> `test-engineer`.
+Deprecated aliases (backward compatibility): `researcher` -> `document-specialist`, `tdd-guide` -> `test-engineer`.
 
 Some roles are alias prompts mapped to core agent types; the canonical set is in `src/agents/definitions.ts`.
 </agent_catalog>
@@ -177,13 +178,14 @@ Workflow Skills:
 - `ultrawork` ("ulw", "ultrawork"): maximum parallelism with parallel agent orchestration
 - `swarm` ("swarm"): compatibility facade over Team; preserves `/swarm` syntax, routes to Team staged pipeline
 - `ultrapilot` ("ultrapilot", "parallel build"): compatibility facade over Team; maps onto Team's staged runtime
-- `ecomode` ("eco", "ecomode", "budget"): token-efficient execution using haiku and sonnet
-- `team` ("team", "coordinated team"): N coordinated agents using Claude Code native teams
+- `ecomode` ("ecomode", "eco-mode", "eco mode", "save-tokens"): token-efficient execution using haiku and sonnet
+- `team` ("team", "coordinated team", "team ralph"): N coordinated agents using Claude Code native teams with stage-aware agent routing; supports `team ralph` for persistent team execution
 - `pipeline` ("pipeline", "chain agents"): sequential agent chaining with data passing
 - `ultraqa` (activated by autopilot): QA cycling -- test, verify, fix, repeat
 - `plan` ("plan this", "plan the"): strategic planning; supports `--consensus` and `--review` modes
 - `ralplan` ("ralplan", "consensus plan"): alias for `/plan --consensus` -- iterative planning with Planner, Architect, Critic until consensus
-- `research` ("research", "analyze data"): parallel scientist agents for comprehensive research
+- `sciomc` ("sciomc"): parallel scientist agents for comprehensive analysis
+- `external-context`: invoke parallel document-specialist agents for web searches
 - `deepinit` ("deepinit"): deep codebase init with hierarchical AGENTS.md
 
 Agent Shortcuts (thin wrappers; call the agent directly with `model` for more control):
@@ -203,9 +205,11 @@ MCP Delegation (auto-detected when an intent phrase is present):
 - `ask gemini`, `use gemini`, `delegate to gemini` -> `ask_gemini`
 - Bare keywords without an intent phrase do not trigger delegation.
 
-Utilities: `cancel`, `note`, `learner`, `omc-setup`, `mcp-setup`, `hud`, `doctor`, `help`, `trace`, `release`, `project-session-manager` (psm), `skill`, `writer-memory`, `ralph-init`, `learn-about-omc`
+Notifications: `configure-discord` ("configure discord", "setup discord", "discord webhook"), `configure-telegram` ("configure telegram", "setup telegram", "telegram bot")
 
-Conflict resolution: explicit mode keywords (`ulw`, `ultrawork`, `eco`, `ecomode`) override defaults. When both are present, ecomode wins. Generic "fast"/"parallel" reads `~/.claude/.omc-config.json` -> `defaultExecutionMode`. Ralph includes ultrawork (persistence wrapper). Ecomode is a model-routing modifier only. Autopilot can transition to ralph or ultraqa. Autopilot and ultrapilot are mutually exclusive.
+Utilities: `cancel`, `note`, `learner`, `omc-setup`, `mcp-setup`, `hud`, `omc-doctor`, `omc-help`, `trace`, `release`, `project-session-manager` (psm), `skill`, `writer-memory`, `ralph-init`, `learn-about-omc`
+
+Conflict resolution: explicit mode keywords (`ulw`, `ultrawork`, `ecomode`, `eco-mode`, `eco mode`, `save-tokens`) override defaults. When both are present, ecomode wins. Generic "fast"/"parallel" reads `~/.claude/.omc-config.json` -> `defaultExecutionMode`. Ralph includes ultrawork (persistence wrapper). Ecomode is a model-routing modifier only. Autopilot can transition to ralph or ultraqa. Autopilot and ultrapilot are mutually exclusive.
 </skills>
 
 ---
@@ -237,6 +241,13 @@ Team is the default multi-agent orchestrator. It uses a canonical staged pipelin
 
 `team-plan -> team-prd -> team-exec -> team-verify -> team-fix (loop)`
 
+Stage Agent Routing (each stage uses specialized agents, not just executors):
+- `team-plan`: `explore` (haiku) + `planner` (opus), optionally `analyst`/`architect`
+- `team-prd`: `analyst` (opus), optionally `product-manager`/`critic`
+- `team-exec`: `executor` (sonnet) + task-appropriate specialists (`designer`, `build-fixer`, `writer`, `test-engineer`, `deep-executor`)
+- `team-verify`: `verifier` (sonnet) + `security-reviewer`/`code-reviewer`/`quality-reviewer`/`performance-reviewer` as needed
+- `team-fix`: `executor`/`build-fixer`/`debugger` depending on defect type
+
 Stage transitions:
 - `team-plan` -> `team-prd`: planning/decomposition complete
 - `team-prd` -> `team-exec`: acceptance criteria and scope are explicit
@@ -248,9 +259,13 @@ The `team-fix` loop is bounded by max attempts; exceeding the bound transitions 
 
 Terminal states: `complete`, `failed`, `cancelled`.
 
+State persistence: Team writes state via `state_write(mode="team")` tracking `current_phase`, `team_name`, `fix_loop_count`, `linked_ralph`, and `stage_history`. Read with `state_read(mode="team")`.
+
 Resume: detect existing team state and resume from the last incomplete stage using staged state + live task status.
 
-Cancel: `/oh-my-claudecode:cancel` requests teammate shutdown, marks phase `cancelled` with `active=false`, records cancellation metadata, and runs cleanup. Cancelled state can be resumed if `preserve_for_resume` is set.
+Cancel: `/oh-my-claudecode:cancel` requests teammate shutdown, marks phase `cancelled` with `active=false`, records cancellation metadata, and runs cleanup. If linked to ralph, both modes are cancelled together.
+
+Team + Ralph composition: When both `team` and `ralph` keywords are detected (e.g., `/team ralph "task"`), team provides multi-agent orchestration while ralph provides the persistence loop. Both write linked state files (`linked_team`/`linked_ralph`). Cancel either mode cancels both.
 </team_pipeline>
 
 ---
@@ -273,7 +288,7 @@ Broad Request Detection:
 Parallelization:
 - Run 2+ independent tasks in parallel when each takes >30s.
 - Run dependent tasks sequentially.
-- Use `run_in_background: true` for installs, builds, and tests (up to 5 concurrent).
+- Use `run_in_background: true` for installs, builds, and tests (up to 20 concurrent).
 - Prefer Team mode as the primary parallel execution surface. Use ad hoc parallelism (`run_in_background`) only when Team overhead is disproportionate to the task.
 
 Continuation:

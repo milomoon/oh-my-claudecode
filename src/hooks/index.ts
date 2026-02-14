@@ -341,7 +341,7 @@ export {
 } from './background-notification/index.js';
 
 export {
-  // Directory README Injector
+  // Directory README / AGENTS.md Injector
   createDirectoryReadmeInjectorHook,
   getReadmesForPath,
   loadInjectedPaths,
@@ -349,6 +349,8 @@ export {
   clearInjectedPaths,
   README_INJECTOR_STORAGE,
   README_FILENAME,
+  AGENTS_FILENAME,
+  CONTEXT_FILENAMES,
   TRACKED_TOOLS as README_TRACKED_TOOLS,
   type InjectedPathsData
 } from './directory-readme-injector/index.js';
@@ -575,6 +577,7 @@ export {
   writeAutopilotState,
   clearAutopilotState,
   isAutopilotActive,
+  getAutopilotStateAge,
   initAutopilot,
   transitionPhase,
   incrementAgentCount,
@@ -614,6 +617,7 @@ export {
   canResumeAutopilot,
   resumeAutopilot,
   formatCancelMessage,
+  STALE_STATE_MAX_AGE_MS,
   DEFAULT_CONFIG,
   type AutopilotPhase,
   type AutopilotState,
@@ -700,7 +704,6 @@ export {
   processSetupInit,
   pruneOldStateFiles,
   cleanupOrphanedState,
-  vacuumSwarmDb,
   processSetupMaintenance,
   processSetup,
   type SetupInput,

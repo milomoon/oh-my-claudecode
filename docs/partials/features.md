@@ -68,7 +68,7 @@ Background agents can be resumed with full context via `resume-session` tool.
 
 ## Ultrapilot (v3.4)
 
-Parallel autopilot with up to 5 concurrent workers for 3-5x faster execution.
+Parallel autopilot with up to 20 concurrent workers for 3-5x faster execution.
 
 **Trigger:** "ultrapilot", "parallel build", "swarm build"
 
@@ -105,7 +105,7 @@ Sequential agent chaining with data passing between stages.
 | `review` | explore -> architect -> critic -> executor |
 | `implement` | planner -> executor -> tdd-guide |
 | `debug` | explore -> architect -> build-fixer |
-| `research` | parallel(researcher, explore) -> architect -> writer |
+| `research` | parallel(document-specialist, explore) -> architect -> writer |
 | `refactor` | explore -> architect-medium -> executor-high -> qa-tester |
 | `security` | explore -> security-reviewer -> executor -> security-reviewer-low |
 

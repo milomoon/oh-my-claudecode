@@ -1,4 +1,4 @@
-English | [한국어](README.ko.md) | [中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md)
+English | [한국어](README.ko.md) | [中文](README.zh.md) | [日本語](README.ja.md) | [Español](README.es.md) | [Tiếng Việt](README.vi.md) | [Português](README.pt.md)
 
 # oh-my-claudecode
 
@@ -75,7 +75,7 @@ Enable Claude Code native teams in `~/.claude/settings.json`:
 If you experience issues after updating, clear the old plugin cache:
 
 ```bash
-/oh-my-claudecode:doctor
+/oh-my-claudecode:omc-doctor
 ```
 
 <h1 align="center">Your Claude Just Have been Steroided.</h1>
@@ -164,6 +164,26 @@ omc wait --stop   # Disable daemon
 ```
 
 **Requires:** tmux (for session detection)
+
+### Notification Tags (Telegram/Discord)
+
+You can configure who gets tagged when stop callbacks send session summaries.
+
+```bash
+# Set/replace tag list
+omc config-stop-callback telegram --enable --token <bot_token> --chat <chat_id> --tag-list "@alice,bob"
+omc config-stop-callback discord --enable --webhook <url> --tag-list "@here,123456789012345678,role:987654321098765432"
+
+# Incremental updates
+omc config-stop-callback telegram --add-tag charlie
+omc config-stop-callback discord --remove-tag @here
+omc config-stop-callback discord --clear-tags
+```
+
+Tag behavior:
+- Telegram: `alice` becomes `@alice`
+- Discord: supports `@here`, `@everyone`, numeric user IDs, and `role:<id>`
+- `file` callbacks ignore tag options
 
 ---
 

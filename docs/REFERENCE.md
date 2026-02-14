@@ -135,6 +135,30 @@ This is a TypeScript monorepo using:
 - Tests alongside source files
 ```
 
+### Stop Callback Notification Tags
+
+Configure tags for Telegram/Discord stop callbacks with `omc config-stop-callback`.
+
+```bash
+# Set/replace tags
+omc config-stop-callback telegram --enable --token <bot_token> --chat <chat_id> --tag-list "@alice,bob"
+omc config-stop-callback discord --enable --webhook <url> --tag-list "@here,123456789012345678,role:987654321098765432"
+
+# Incremental updates
+omc config-stop-callback telegram --add-tag charlie
+omc config-stop-callback discord --remove-tag @here
+omc config-stop-callback discord --clear-tags
+
+# Inspect current callback config
+omc config-stop-callback telegram --show
+omc config-stop-callback discord --show
+```
+
+Tag behavior:
+- Telegram: `alice` is normalized to `@alice`
+- Discord: supports `@here`, `@everyone`, numeric user IDs (`<@id>`), and role tags (`role:<id>` -> `<@&id>`)
+- `file` callbacks ignore tag options
+
 ---
 
 ## Agents (28 Total)
@@ -148,7 +172,7 @@ Always use `oh-my-claudecode:` prefix when calling via Task tool.
 | **Analysis** | `architect-low` | `architect-medium` | `architect` |
 | **Execution** | `executor-low` | `executor` | `executor-high` |
 | **Search** | `explore` | - | `explore-high` |
-| **Research** | - | `researcher` | - |
+| **Research** | - | `document-specialist` | - |
 | **Frontend** | `designer-low` | `designer` | `designer-high` |
 | **Docs** | `writer` | - | - |
 | **Visual** | - | `vision` | - |
@@ -177,7 +201,7 @@ Always use `oh-my-claudecode:` prefix when calling via Task tool.
 | UI component | `designer` | sonnet |
 | Complex UI system | `designer-high` | opus |
 | Write docs/comments | `writer` | haiku |
-| Research docs/APIs | `researcher` | sonnet |
+| Research docs/APIs | `document-specialist` | sonnet |
 | Analyze images/diagrams | `vision` | sonnet |
 | Strategic planning | `planner` | opus |
 | Review/critique plan | `critic` | opus |
@@ -224,7 +248,7 @@ Always use `oh-my-claudecode:` prefix when calling via Task tool.
 | `deepinit` | Hierarchical AGENTS.md codebase documentation | `/oh-my-claudecode:deepinit` |
 | `deepsearch` | Thorough multi-strategy codebase search | `/oh-my-claudecode:deepsearch` |
 | `analyze` | Deep analysis and investigation | `/oh-my-claudecode:analyze` |
-| `research` | Parallel scientist orchestration | `/oh-my-claudecode:research` |
+| `sciomc` | Parallel scientist orchestration | `/oh-my-claudecode:sciomc` |
 | `frontend-ui-ux` | Designer-turned-developer UI/UX expertise | (silent activation) |
 | `git-master` | Git expert for atomic commits and history | (silent activation) |
 | `tdd` | TDD enforcement: test-first development | `/oh-my-claudecode:tdd` |
@@ -240,8 +264,8 @@ Always use `oh-my-claudecode:` prefix when calling via Task tool.
 | `note` | Save notes to compaction-resilient notepad | `/oh-my-claudecode:note` |
 | `cancel` | Unified cancellation for all modes | `/oh-my-claudecode:cancel` |
 | `omc-setup` | One-time setup wizard | `/oh-my-claudecode:omc-setup` |
-| `doctor` | Diagnose and fix installation issues | `/oh-my-claudecode:doctor` |
-| `help` | Show OMC usage guide | `/oh-my-claudecode:help` |
+| `omc-doctor` | Diagnose and fix installation issues | `/oh-my-claudecode:omc-doctor` |
+| `omc-help` | Show OMC usage guide | `/oh-my-claudecode:omc-help` |
 | `hud` | Configure HUD statusline | `/oh-my-claudecode:hud` |
 | `release` | Automated release workflow | `/oh-my-claudecode:release` |
 | `mcp-setup` | Configure MCP servers | `/oh-my-claudecode:mcp-setup` |
@@ -273,14 +297,14 @@ All skills are available as slash commands with the prefix `/oh-my-claudecode:`.
 | `/oh-my-claudecode:deepsearch <query>` | Thorough multi-strategy codebase search |
 | `/oh-my-claudecode:deepinit [path]` | Index codebase with hierarchical AGENTS.md files |
 | `/oh-my-claudecode:analyze <target>` | Deep analysis and investigation |
-| `/oh-my-claudecode:research <topic>` | Parallel research orchestration |
+| `/oh-my-claudecode:sciomc <topic>` | Parallel research orchestration |
 | `/oh-my-claudecode:tdd <feature>` | TDD workflow enforcement |
 | `/oh-my-claudecode:learner` | Extract reusable skill from session |
 | `/oh-my-claudecode:note <content>` | Save notes to notepad.md |
 | `/oh-my-claudecode:cancel` | Unified cancellation |
 | `/oh-my-claudecode:omc-setup` | One-time setup wizard |
-| `/oh-my-claudecode:doctor` | Diagnose and fix installation issues |
-| `/oh-my-claudecode:help` | Show OMC usage guide |
+| `/oh-my-claudecode:omc-doctor` | Diagnose and fix installation issues |
+| `/oh-my-claudecode:omc-help` | Show OMC usage guide |
 | `/oh-my-claudecode:hud` | Configure HUD statusline |
 | `/oh-my-claudecode:release` | Automated release workflow |
 | `/oh-my-claudecode:mcp-setup` | Configure MCP servers |
@@ -364,7 +388,7 @@ Just include these words anywhere in your prompt to activate enhanced modes:
 | `ralplan` | Iterative planning consensus |
 | `search`, `find`, `locate` | Enhanced search mode |
 | `analyze`, `investigate`, `debug` | Deep analysis mode |
-| `research`, `analyze data`, `statistics` | Parallel research orchestration |
+| `sciomc` | Parallel research orchestration |
 | `tdd`, `test first`, `red green` | TDD workflow enforcement |
 | `swarm N agents` | Coordinated agent swarm |
 | `pipeline`, `chain agents` | Sequential agent chaining |
@@ -433,6 +457,13 @@ By default, both files must reside within the `working_directory`:
 | `OMC_MCP_OUTPUT_REDIRECT_DIR` | Path (default: `.omc/outputs`) | Directory for redirected outputs when policy is `redirect_output` |
 | `OMC_MCP_ALLOW_EXTERNAL_PROMPT` | `0` (default), `1` | Allow prompt files outside working directory |
 | `OMC_ALLOW_EXTERNAL_WORKDIR` | unset (default), `1` | Allow working_directory outside project worktree |
+| `OMC_DISCORD_WEBHOOK_URL` | URL | Discord webhook URL for notifications |
+| `OMC_DISCORD_NOTIFIER_BOT_TOKEN` | Token | Discord bot token for Bot API notifications |
+| `OMC_DISCORD_NOTIFIER_CHANNEL` | Channel ID | Discord channel ID for Bot API notifications |
+| `OMC_DISCORD_MENTION` | `<@uid>` or `<@&role_id>` | Mention to prepend to Discord messages |
+| `OMC_TELEGRAM_BOT_TOKEN` | Token | Telegram bot token for notifications |
+| `OMC_TELEGRAM_CHAT_ID` | Chat ID | Telegram chat ID for notifications |
+| `OMC_SLACK_WEBHOOK_URL` | URL | Slack incoming webhook URL for notifications |
 
 ### Policy Descriptions
 
@@ -604,7 +635,7 @@ Enable detailed cost tracking in your status line:
 ### Diagnose Installation Issues
 
 ```bash
-/oh-my-claudecode:doctor
+/oh-my-claudecode:omc-doctor
 ```
 
 Checks for:
@@ -683,7 +714,7 @@ curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/oh-my-claudecode/main/s
 Or manually:
 
 ```bash
-rm ~/.claude/agents/{architect,researcher,explore,designer,writer,vision,critic,analyst,executor,qa-tester}.md
+rm ~/.claude/agents/{architect,document-specialist,explore,designer,writer,vision,critic,analyst,executor,qa-tester}.md
 rm ~/.claude/commands/{analyze,autopilot,deepsearch,plan,review,ultrawork}.md
 ```
 

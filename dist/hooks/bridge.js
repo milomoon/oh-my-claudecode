@@ -15,6 +15,7 @@
 import { pathToFileURL } from 'url';
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { resolveToWorktreeRoot } from "../lib/worktree-paths.js";
 // Hot-path imports: needed on every/most hook invocations (keyword-detector, pre/post-tool-use)
 import { removeCodeBlocks, getAllKeywords } from "./keyword-detector/index.js";
 import { processOrchestratorPreTool, processOrchestratorPostTool } from "./omc-orchestrator/index.js";
@@ -166,7 +167,7 @@ async function processKeywordDetector(input) {
         return { continue: true };
     }
     const sessionId = input.sessionId;
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     const messages = [];
     // Process each keyword and collect messages
     for (const keywordType of keywords) {
@@ -176,7 +177,7 @@ async function processKeywordDetector(input) {
                 const { createRalphLoopHook } = await import("./ralph/index.js");
                 // Activate ralph state which also auto-activates ultrawork
                 const hook = createRalphLoopHook(directory);
-                hook.startLoop(sessionId || "cli-session", promptText);
+                hook.startLoop(sessionId, promptText);
                 messages.push(RALPH_MESSAGE);
                 break;
             }
@@ -207,7 +208,6 @@ async function processKeywordDetector(input) {
             case "ralplan":
             case "plan":
             case "tdd":
-            case "research":
                 messages.push(`[MODE: ${keywordType.toUpperCase()}] Skill invocation handled by UserPromptSubmit hook.`);
                 break;
             default:
@@ -239,7 +239,7 @@ async function processStopContinuation(_input) {
  */
 async function processRalph(input) {
     const sessionId = input.sessionId;
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     if (!sessionId) {
         return { continue: true };
     }
@@ -303,7 +303,7 @@ ${newState.prompt}`;
  */
 async function processPersistentMode(input) {
     const sessionId = input.sessionId;
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     // Lazy-load persistent-mode and todo-continuation modules
     const { checkPersistentModes, createHookOutput } = await import("./persistent-mode/index.js");
     // Extract stop context for abort detection (supports both camelCase and snake_case)
@@ -317,6 +317,18 @@ async function processPersistentMode(input) {
     const output = createHookOutput(result);
     const teamState = readTeamStagedState(directory, sessionId);
     if (!teamState || teamState.active !== true || isTeamStateTerminal(teamState)) {
+        // No persistent mode and no active team — Claude is truly idle.
+        // Send session-idle notification (non-blocking) unless this was a user abort or context limit.
+        if (result.mode === "none" && sessionId) {
+            const isAbort = stopContext.user_requested === true || stopContext.userRequested === true;
+            const isContextLimit = stopContext.stop_reason === "context_limit" || stopContext.stopReason === "context_limit";
+            if (!isAbort && !isContextLimit) {
+                import("../notifications/index.js").then(({ notify }) => notify("session-idle", {
+                    sessionId,
+                    projectPath: directory,
+                }).catch(() => { })).catch(() => { });
+            }
+        }
         return output;
     }
     const stage = getTeamStage(teamState);
@@ -348,7 +360,7 @@ When team verification passes or cancel is requested, allow terminal cleanup beh
  */
 async function processSessionStart(input) {
     const sessionId = input.sessionId;
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     // Lazy-load session-start dependencies
     const { initSilentAutoUpdate } = await import("../features/auto-update.js");
     const { readAutopilotState } = await import("./autopilot/index.js");
@@ -356,6 +368,13 @@ async function processSessionStart(input) {
     const { checkIncompleteTodos } = await import("./todo-continuation/index.js");
     // Trigger silent auto-update check (non-blocking, checks config internally)
     initSilentAutoUpdate();
+    // Send session-start notification (non-blocking, swallows errors)
+    if (sessionId) {
+        import("../notifications/index.js").then(({ notify }) => notify("session-start", {
+            sessionId,
+            projectPath: directory,
+        }).catch(() => { })).catch(() => { });
+    }
     const messages = [];
     // Check for active autopilot state - only restore if it belongs to this session
     const autopilotState = readAutopilotState(directory);
@@ -430,6 +449,38 @@ Resume from this stage and continue the staged Team workflow.
 `);
         }
     }
+    // Load root AGENTS.md if it exists (deepinit output - issue #613)
+    const agentsMdPath = join(directory, 'AGENTS.md');
+    if (existsSync(agentsMdPath)) {
+        try {
+            let agentsContent = readFileSync(agentsMdPath, 'utf-8').trim();
+            if (agentsContent) {
+                // Truncate to ~5000 tokens (20000 chars) to avoid context bloat
+                const MAX_AGENTS_CHARS = 20000;
+                let truncationNotice = '';
+                if (agentsContent.length > MAX_AGENTS_CHARS) {
+                    agentsContent = agentsContent.slice(0, MAX_AGENTS_CHARS);
+                    truncationNotice = `\n\n[Note: Content was truncated. For full context, read: ${agentsMdPath}]`;
+                }
+                messages.push(`<session-restore>
+
+[ROOT AGENTS.md LOADED]
+
+The following project documentation was generated by deepinit to help AI agents understand the codebase:
+
+${agentsContent}${truncationNotice}
+
+</session-restore>
+
+---
+
+`);
+            }
+        }
+        catch {
+            // Skip if file can't be read
+        }
+    }
     // Check for incomplete todos
     const todoResult = await checkIncompleteTodos(sessionId, directory);
     if (todoResult.count > 0) {
@@ -455,11 +506,30 @@ Please continue working on these tasks.
     return { continue: true };
 }
 /**
+ * Fire-and-forget notification for AskUserQuestion (issue #597).
+ * Extracted for testability; the dynamic import makes direct assertion
+ * on the notify() call timing-sensitive, so tests spy on this wrapper instead.
+ */
+export function dispatchAskUserQuestionNotification(sessionId, directory, toolInput) {
+    const input = toolInput;
+    const questions = input?.questions || [];
+    const questionText = questions.map(q => q.question || "").filter(Boolean).join("; ") || "User input requested";
+    import("../notifications/index.js").then(({ notify }) => notify("ask-user-question", {
+        sessionId,
+        projectPath: directory,
+        question: questionText,
+    }).catch(() => { })).catch(() => { });
+}
+/** @internal Object wrapper so tests can spy on the dispatch call. */
+export const _notify = {
+    askUserQuestion: dispatchAskUserQuestionNotification,
+};
+/**
  * Process pre-tool-use hook
  * Checks delegation enforcement and tracks background tasks
  */
 function processPreToolUse(input) {
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     // Check delegation enforcement FIRST
     const enforcementResult = processOrchestratorPreTool({
         toolName: input.toolName || "",
@@ -474,6 +544,11 @@ function processPreToolUse(input) {
             reason: enforcementResult.reason,
             message: enforcementResult.message,
         };
+    }
+    // Notify when AskUserQuestion is about to execute (issue #597)
+    // Fire-and-forget: notify users that input is needed BEFORE the tool blocks
+    if (input.toolName === "AskUserQuestion" && input.sessionId) {
+        _notify.askUserQuestion(input.sessionId, directory, input.toolInput);
     }
     // Warn about pkill -f self-termination risk (issue #210)
     // Matches: pkill -f, pkill -9 -f, pkill --full, etc.
@@ -547,9 +622,42 @@ function processPreToolUse(input) {
 /**
  * Process post-tool-use hook
  */
-function processPostToolUse(input) {
-    const directory = input.directory || process.cwd();
+function getInvokedSkillName(toolInput) {
+    if (!toolInput || typeof toolInput !== "object") {
+        return null;
+    }
+    const input = toolInput;
+    const rawSkill = input.skill ??
+        input.skill_name ??
+        input.skillName ??
+        input.command ??
+        null;
+    if (typeof rawSkill !== "string" || rawSkill.trim().length === 0) {
+        return null;
+    }
+    const normalized = rawSkill.trim();
+    const namespaced = normalized.includes(":")
+        ? normalized.split(":").at(-1)
+        : normalized;
+    return namespaced?.toLowerCase() || null;
+}
+async function processPostToolUse(input) {
+    const directory = resolveToWorktreeRoot(input.directory);
     const messages = [];
+    // Ensure mode state activation also works when execution starts via Skill tool
+    // (e.g., ralplan consensus handoff into Skill("oh-my-claudecode:ralph")).
+    const toolName = (input.toolName || "").toLowerCase();
+    if (toolName === "skill") {
+        const skillName = getInvokedSkillName(input.toolInput);
+        if (skillName === "ralph") {
+            const { createRalphLoopHook } = await import("./ralph/index.js");
+            const promptText = typeof input.prompt === "string" && input.prompt.trim().length > 0
+                ? input.prompt
+                : "Ralph loop activated via Skill tool";
+            const hook = createRalphLoopHook(directory);
+            hook.startLoop(input.sessionId, promptText);
+        }
+    }
     // Run orchestrator post-tool processing (remember tags, verification reminders, etc.)
     const orchestratorResult = processOrchestratorPostTool({
         toolName: input.toolName || "",
@@ -580,7 +688,7 @@ function processPostToolUse(input) {
  * Manages autopilot state and injects phase prompts
  */
 async function processAutopilot(input) {
-    const directory = input.directory || process.cwd();
+    const directory = resolveToWorktreeRoot(input.directory);
     // Lazy-load autopilot module
     const { readAutopilotState, getPhasePrompt } = await import("./autopilot/index.js");
     const state = readAutopilotState(directory, input.sessionId);
@@ -651,7 +759,7 @@ export async function processHook(hookType, rawInput) {
             case "pre-tool-use":
                 return processPreToolUse(input);
             case "post-tool-use":
-                return processPostToolUse(input);
+                return await processPostToolUse(input);
             case "autopilot":
                 return await processAutopilot(input);
             // Lazy-loaded async hook types
