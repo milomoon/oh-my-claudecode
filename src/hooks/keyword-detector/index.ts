@@ -26,7 +26,8 @@ export type KeywordType =
   | 'analyze'     // Priority 13
   | 'codex'       // Priority 14
   | 'gemini'      // Priority 15
-  | 'ccg';        // Priority 8.5 (Claude-Codex-Gemini orchestration)
+  | 'ccg'         // Priority 8.5 (Claude-Codex-Gemini orchestration)
+  | 'ecomode';    // Priority 17
 
 export interface DetectedKeyword {
   type: KeywordType;
@@ -55,17 +56,17 @@ tdd: /\b(tdd)\b|\btest\s+first\b/i,
   analyze: /\b(deep[\s-]?analyze|deepanalyze)\b/i,
   ccg: /\b(ccg|claude-codex-gemini)\b/i,
   codex: /\b(ask|use|delegate\s+to)\s+(codex|gpt)\b/i,
-  gemini: /\b(ask|use|delegate\s+to)\s+gemini\b/i
+  gemini: /\b(ask|use|delegate\s+to)\s+gemini\b/i,
+  ecomode: /\b(ecomode|eco[\s-]?mode)\b/i
 };
 
 /**
  * Priority order for keyword detection
  */
 const KEYWORD_PRIORITY: KeywordType[] = [
-'cancel', 'ralph', 'autopilot', 'ultrapilot', 'team', 'ultrawork',
-  'swarm', 'pipeline', 'ralplan', 'plan', 'tdd',
-  'swarm', 'pipeline', 'ccg', 'ralplan', 'plan', 'tdd', 'research',
-  'ultrathink', 'deepsearch', 'analyze', 'codex', 'gemini'
+  'cancel', 'ralph', 'autopilot', 'ultrapilot', 'team', 'ultrawork',
+  'swarm', 'pipeline', 'ccg', 'ralplan', 'plan', 'tdd',
+  'ultrathink', 'deepsearch', 'analyze', 'codex', 'gemini', 'ecomode'
 ];
 
 /**
