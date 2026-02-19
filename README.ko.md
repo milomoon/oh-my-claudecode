@@ -26,7 +26,7 @@
 
 **Step 2: 설정**
 ```bash
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
 
 **Step 3: 무언가 만들기**
@@ -41,17 +41,19 @@ autopilot: build a REST API for managing tasks
 ### 업데이트
 
 ```bash
-# 1. 플러그인 업데이트
-/plugin install oh-my-claudecode
+# 1. 마켓플레이스 클론 업데이트
+/plugin marketplace update omc
 
 # 2. 셋업을 다시 실행하여 설정 갱신
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
+
+> **참고:** 마켓플레이스 auto-update가 활성화되어 있지 않은 경우, 셋업 실행 전에 `/plugin marketplace update omc`를 수동으로 실행하여 최신 버전을 동기화해야 합니다.
 
 업데이트 후 문제가 발생하면, 이전 플러그인 캐시를 정리하세요:
 
 ```bash
-/oh-my-claudecode:omc-doctor
+/omc:omc-doctor
 ```
 
 <h1 align="center">당신의 Claude가 스테로이드를 맞았습니다.</h1>

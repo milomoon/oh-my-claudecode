@@ -11,8 +11,8 @@
  * 3. autopilot: Full autonomous execution
  * 4. team: Coordinated team execution (replaces ultrapilot/swarm)
  * 5. ultrawork/ulw: Maximum parallel execution
- * 6. ecomode/eco: Token-efficient execution
- * 7. pipeline: Sequential agent chaining
+ * 6. pipeline: Sequential agent chaining
+ * 7. ccg: Claude-Codex-Gemini tri-model orchestration
  * 9. ralplan: Iterative planning with consensus
  * 10. plan: Planning interview mode
  * 11. tdd: Test-driven development
@@ -304,10 +304,6 @@ function resolveConflicts(matches) {
 
   let resolved = [...matches];
 
-  // Ecomode beats ultrawork
-  if (names.includes('ecomode') && names.includes('ultrawork')) {
-    resolved = resolved.filter(m => m.name !== 'ultrawork');
-  }
 
   // Team beats autopilot (legacy ultrapilot semantics)
   if (names.includes('team') && names.includes('autopilot')) {
@@ -323,8 +319,8 @@ function resolveConflicts(matches) {
   // Both keywords are preserved so the skill can detect the composition.
 
   // Sort by priority order
-  const priorityOrder = ['cancel','ralph','autopilot','team','ultrawork','ecomode',
-    'pipeline','ralplan','plan','tdd','research','ultrathink','deepsearch','analyze',
+  const priorityOrder = ['cancel','ralph','autopilot','team','ultrawork',
+    'pipeline','ccg','ralplan','plan','tdd','research','ultrathink','deepsearch','analyze',
     'codex','gemini'];
   resolved.sort((a, b) => priorityOrder.indexOf(a.name) - priorityOrder.indexOf(b.name));
 
@@ -407,10 +403,6 @@ async function main() {
       matches.push({ name: 'ultrawork', args: '' });
     }
 
-    // Ecomode keywords
-    if (/\b(eco|ecomode|eco-mode|efficient|save-tokens|budget)\b/i.test(cleanPrompt)) {
-      matches.push({ name: 'ecomode', args: '' });
-    }
 
     // Team keywords (intent-gated to prevent false positives on bare "team")
     // Uses negative lookbehind to exclude possessive/article contexts like "my team", "the team"
@@ -423,6 +415,11 @@ async function main() {
     // Pipeline keywords
     if (/\b(pipeline)\b/i.test(cleanPrompt) || /\bchain\s+agents\b/i.test(cleanPrompt)) {
       matches.push({ name: 'pipeline', args: '' });
+    }
+
+    // CCG keywords (Claude-Codex-Gemini tri-model orchestration)
+    if (/\b(ccg|claude-codex-gemini)\b/i.test(cleanPrompt)) {
+      matches.push({ name: 'ccg', args: '' });
     }
 
     // Ralplan keyword
@@ -510,13 +507,13 @@ async function main() {
 
     // Handle cancel specially - clear states and emit
     if (resolved.length > 0 && resolved[0].name === 'cancel') {
-      clearStateFiles(directory, ['ralph', 'autopilot', 'team', 'ultrawork', 'ecomode', 'swarm', 'pipeline'], sessionId);
+      clearStateFiles(directory, ['ralph', 'autopilot', 'team', 'ultrawork', 'swarm', 'pipeline'], sessionId);
       console.log(JSON.stringify(createHookOutput(createSkillInvocation('cancel', prompt))));
       return;
     }
 
     // Activate states for modes that need them
-    const stateModes = resolved.filter(m => ['ralph', 'autopilot', 'team', 'ultrawork', 'ecomode'].includes(m.name));
+    const stateModes = resolved.filter(m => ['ralph', 'autopilot', 'team', 'ultrawork'].includes(m.name));
     for (const mode of stateModes) {
       activateState(directory, prompt, mode.name, sessionId);
     }
@@ -528,12 +525,11 @@ async function main() {
       }
     }
 
-    // Special: Ralph with ultrawork (only if ecomode NOT present)
+    // Special: Ralph with ultrawork
     const hasRalph = resolved.some(m => m.name === 'ralph');
-    const hasEcomode = resolved.some(m => m.name === 'ecomode');
     const hasUltrawork = resolved.some(m => m.name === 'ultrawork');
     const hasTeam = resolved.some(m => m.name === 'team');
-    if (hasRalph && !hasEcomode && !hasUltrawork) {
+    if (hasRalph && !hasUltrawork) {
       activateState(directory, prompt, 'ultrawork', sessionId);
     }
 

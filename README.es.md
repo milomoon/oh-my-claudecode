@@ -26,7 +26,7 @@
 
 **Paso 2: Configurar**
 ```bash
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
 
 **Paso 3: Construye algo**
@@ -41,17 +41,19 @@ Eso es todo. Todo lo demás es automático.
 ### Actualizar
 
 ```bash
-# 1. Actualizar el plugin
-/plugin install oh-my-claudecode
+# 1. Actualizar el clon del marketplace
+/plugin marketplace update omc
 
 # 2. Volver a ejecutar el setup para actualizar la configuracion
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
+
+> **Nota:** Si la actualizacion automatica del marketplace no esta activada, debes ejecutar manualmente `/plugin marketplace update omc` para sincronizar la ultima version antes de ejecutar el setup.
 
 Si experimentas problemas despues de actualizar, limpia la cache antigua del plugin:
 
 ```bash
-/oh-my-claudecode:omc-doctor
+/omc:omc-doctor
 ```
 
 <h1 align="center">Tu Claude acaba de recibir esteroides.</h1>

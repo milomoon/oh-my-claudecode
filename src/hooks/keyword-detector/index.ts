@@ -16,7 +16,7 @@ export type KeywordType =
   | 'ultrapilot'  // Priority 4
   | 'team'        // Priority 4.5 (team mode)
   | 'ultrawork'   // Priority 5
-  | 'swarm'       // Priority 6
+| 'swarm'       // Priority 6
   | 'pipeline'    // Priority 7
   | 'ralplan'     // Priority 8
   | 'plan'        // Priority 9
@@ -25,7 +25,8 @@ export type KeywordType =
   | 'deepsearch'  // Priority 12
   | 'analyze'     // Priority 13
   | 'codex'       // Priority 14
-  | 'gemini';     // Priority 15
+  | 'gemini'      // Priority 15
+  | 'ccg';        // Priority 8.5 (Claude-Codex-Gemini orchestration)
 
 export interface DetectedKeyword {
   type: KeywordType;
@@ -48,10 +49,11 @@ const KEYWORD_PATTERNS: Record<KeywordType, RegExp> = {
   pipeline: /\bagent\s+pipeline\b|\bchain\s+agents\b/i,
   ralplan: /\b(ralplan)\b/i,
   plan: /\bplan\s+(this|the)\b/i,
-  tdd: /\b(tdd)\b|\btest\s+first\b/i,
+tdd: /\b(tdd)\b|\btest\s+first\b/i,
   ultrathink: /\b(ultrathink)\b/i,
   deepsearch: /\b(deepsearch)\b|\bsearch\s+the\s+codebase\b|\bfind\s+in\s+(the\s+)?codebase\b/i,
   analyze: /\b(deep[\s-]?analyze|deepanalyze)\b/i,
+  ccg: /\b(ccg|claude-codex-gemini)\b/i,
   codex: /\b(ask|use|delegate\s+to)\s+(codex|gpt)\b/i,
   gemini: /\b(ask|use|delegate\s+to)\s+gemini\b/i
 };
@@ -61,7 +63,7 @@ const KEYWORD_PATTERNS: Record<KeywordType, RegExp> = {
  */
 const KEYWORD_PRIORITY: KeywordType[] = [
   'cancel', 'ralph', 'autopilot', 'ultrapilot', 'team', 'ultrawork',
-  'swarm', 'pipeline', 'ralplan', 'plan', 'tdd',
+  'swarm', 'pipeline', 'ccg', 'ralplan', 'plan', 'tdd',
   'ultrathink', 'deepsearch', 'analyze', 'codex', 'gemini'
 ];
 
@@ -81,7 +83,7 @@ export function removeCodeBlocks(text: string): string {
 }
 
 /**
- * Sanitize text for keyword detection by removing structural noise.
+* Sanitize text for keyword detection by removing structural noise.
  * Strips XML tags, URLs, file paths, and code blocks.
  */
 export function sanitizeForKeywordDetection(text: string): string {

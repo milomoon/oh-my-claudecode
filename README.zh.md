@@ -26,7 +26,7 @@
 
 **第二步：配置**
 ```bash
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
 
 **第三步：开始构建**
@@ -41,17 +41,19 @@ autopilot: build a REST API for managing tasks
 ### 更新
 
 ```bash
-# 1. 更新插件
-/plugin install oh-my-claudecode
+# 1. 更新 marketplace 克隆
+/plugin marketplace update omc
 
 # 2. 重新运行设置以刷新配置
-/oh-my-claudecode:omc-setup
+/omc:omc-setup
 ```
+
+> **注意：** 如果 marketplace 自动更新未启用，您需要在运行设置之前手动执行 `/plugin marketplace update omc` 来同步最新版本。
 
 如果更新后遇到问题，清除旧的插件缓存：
 
 ```bash
-/oh-my-claudecode:omc-doctor
+/omc:omc-doctor
 ```
 
 <h1 align="center">你的 Claude 已被注入超能力。</h1>
