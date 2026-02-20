@@ -71,7 +71,7 @@ describe('Consolidation contracts', () => {
     it('keeps only canonical agent keys in runtime registry', () => {
       const agents = getAgentDefinitions();
 
-      expect(agents['dependency-expert']).toBeDefined();
+      expect(agents['dependency-expert']).toBeUndefined();
       expect(agents['test-engineer']).toBeDefined();
       expect(agents['document-specialist']).toBeDefined();
       expect(agents['researcher']).toBeUndefined();
