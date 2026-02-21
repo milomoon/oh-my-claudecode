@@ -8,6 +8,7 @@
 import { join } from 'path';
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { homedir } from 'os';
+import { getConfigDir as getClaudeBaseConfigDir } from './config-dir.js';
 /**
  * Convert a path to use forward slashes (for JSON/config files)
  * This is necessary because settings.json commands are executed
@@ -17,10 +18,11 @@ export function toForwardSlash(path) {
     return path.replace(/\\/g, '/');
 }
 /**
- * Get Claude config directory path
+ * Get Claude config directory path.
+ * Respects the CLAUDE_CONFIG_DIR environment variable when set.
  */
 export function getClaudeConfigDir() {
-    return join(homedir(), '.claude');
+    return getClaudeBaseConfigDir();
 }
 /**
  * Get a path suitable for use in shell commands
@@ -52,6 +54,15 @@ export function getConfigDir() {
         return process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
     }
     return process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+}
+/**
+ * Get the plugin cache base directory for oh-my-claudecode.
+ * This is the directory containing version subdirectories.
+ *
+ * Structure: <configDir>/plugins/cache/omc/oh-my-claudecode/
+ */
+export function getPluginCacheBase() {
+    return join(getClaudeConfigDir(), 'plugins', 'cache', 'omc', 'oh-my-claudecode');
 }
 /**
  * Safely delete a file, ignoring ENOENT errors.

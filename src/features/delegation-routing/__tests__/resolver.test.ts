@@ -248,8 +248,11 @@ describe('resolveDelegation', () => {
   // Test 18: All known role categories use defaults correctly
   it.each([
     ['explore', 'explore'],
-    ['researcher', 'researcher'],
+    ['document-specialist', 'document-specialist'],
+    ['researcher', 'document-specialist'],
+    ['tdd-guide', 'test-engineer'],
     ['architect', 'architect'],
+
     ['planner', 'planner'],
     ['critic', 'critic'],
     ['analyst', 'analyst'],
@@ -260,7 +263,7 @@ describe('resolveDelegation', () => {
     ['quality-reviewer', 'quality-reviewer'],
     ['designer', 'designer'],
     ['writer', 'writer'],
-    ['vision', 'vision'],
+    ['vision', 'document-specialist'],
     ['qa-tester', 'qa-tester'],
     ['debugger', 'debugger'],
     ['scientist', 'scientist'],

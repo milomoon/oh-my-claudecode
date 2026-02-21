@@ -25,6 +25,9 @@ export interface PluginConfig {
         researcher?: {
             model?: string;
         };
+        'document-specialist'?: {
+            model?: string;
+        };
         explore?: {
             model?: string;
         };
@@ -116,6 +119,16 @@ export interface PluginConfig {
     };
     externalModels?: ExternalModelsConfig;
     delegationRouting?: DelegationRoutingConfig;
+    taskSizeDetection?: {
+        /** Enable task-size detection to prevent over-orchestration for small tasks. Default: true */
+        enabled?: boolean;
+        /** Word count threshold below which a task is classified as "small". Default: 50 */
+        smallWordLimit?: number;
+        /** Word count threshold above which a task is classified as "large". Default: 200 */
+        largeWordLimit?: number;
+        /** Suppress heavy orchestration modes (ralph/autopilot/team/ultrawork) for small tasks. Default: true */
+        suppressHeavyModesForSmallTasks?: boolean;
+    };
 }
 export interface SessionState {
     sessionId?: string;
