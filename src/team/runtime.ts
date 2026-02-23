@@ -53,6 +53,11 @@ export interface TeamSnapshot {
   workers: WorkerStatus[];
   taskCounts: { pending: number; inProgress: number; completed: number; failed: number; };
   deadWorkers: string[];
+  monitorPerformance: {
+    listTasksMs: number;
+    workerScanMs: number;
+    totalMs: number;
+  };
 }
 
 export interface WatchdogCompletionEvent {
@@ -149,6 +154,15 @@ async function markTaskInProgress(root: string, taskId: string, owner: string): 
   return true;
 }
 
+async function resetTaskToPending(root: string, taskId: string): Promise<void> {
+  const task = await readTask(root, taskId);
+  if (!task) return;
+  task.status = 'pending';
+  task.owner = null;
+  task.assignedAt = undefined;
+  await writeTask(root, task);
+}
+
 async function markTaskFromDone(
   root: string,
   taskId: string,
@@ -186,6 +200,24 @@ async function nextPendingTaskIndex(runtime: TeamRuntime): Promise<number | null
     if (task?.status === 'pending') return i;
   }
   return null;
+}
+
+async function notifyPaneWithRetry(
+  sessionName: string,
+  paneId: string,
+  message: string,
+  maxAttempts = 6,
+  retryDelayMs = 350
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (await sendToWorker(sessionName, paneId, message)) {
+      return true;
+    }
+    if (attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, retryDelayMs));
+    }
+  }
+  return false;
 }
 
 export async function allTasksTerminal(runtime: TeamRuntime): Promise<boolean> {
@@ -300,9 +332,11 @@ export async function startTeam(config: TeamConfig): Promise<TeamRuntime> {
  * Monitor team: poll worker health, detect stalls, return snapshot.
  */
 export async function monitorTeam(teamName: string, cwd: string, workerPaneIds: string[]): Promise<TeamSnapshot> {
+  const monitorStartedAt = Date.now();
   const root = stateRoot(cwd, teamName);
 
   // Read task counts
+  const taskScanStartedAt = Date.now();
   const taskCounts = { pending: 0, inProgress: 0, completed: 0, failed: 0 };
   try {
     const { readdir } = await import('fs/promises');
@@ -315,8 +349,10 @@ export async function monitorTeam(teamName: string, cwd: string, workerPaneIds: 
       else if (task?.status === 'failed') taskCounts.failed++;
     }
   } catch { /* tasks dir may not exist yet */ }
+  const listTasksMs = Date.now() - taskScanStartedAt;
 
   // Check worker health
+  const workerScanStartedAt = Date.now();
   const workers: WorkerStatus[] = [];
   const deadWorkers: string[] = [];
 
@@ -347,6 +383,7 @@ export async function monitorTeam(teamName: string, cwd: string, workerPaneIds: 
     if (!alive) deadWorkers.push(wName);
     // Note: CLI workers (codex/gemini) may not write heartbeat.json — stall is advisory only
   }
+  const workerScanMs = Date.now() - workerScanStartedAt;
 
   // Infer phase from task counts
   let phase = 'executing';
@@ -358,7 +395,18 @@ export async function monitorTeam(teamName: string, cwd: string, workerPaneIds: 
     phase = 'completed';
   }
 
-  return { teamName, phase, workers, taskCounts, deadWorkers };
+  return {
+    teamName,
+    phase,
+    workers,
+    taskCounts,
+    deadWorkers,
+    monitorPerformance: {
+      listTasksMs,
+      workerScanMs,
+      totalMs: Date.now() - monitorStartedAt,
+    },
+  };
 }
 
 /**
@@ -488,14 +536,28 @@ export async function spawnWorkerForTask(
   // Allow agent CLI startup before sending instruction trigger.
   await new Promise(r => setTimeout(r, 4000));
   if (agentType === 'gemini') {
-    await sendToWorker(runtime.sessionName, paneId, '1');
+    const confirmed = await notifyPaneWithRetry(runtime.sessionName, paneId, '1');
+    if (!confirmed) {
+      await killWorkerPane(runtime, workerNameValue, paneId);
+      await resetTaskToPending(root, taskId);
+      throw new Error(`worker_notify_failed:${workerNameValue}:trust-confirm`);
+    }
     await new Promise(r => setTimeout(r, 800));
   }
 
   const instruction = buildInitialTaskInstruction(runtime.teamName, workerNameValue, task, taskId);
   await composeInitialInbox(runtime.teamName, workerNameValue, instruction, runtime.cwd);
   const relInboxPath = `.omc/state/team/${runtime.teamName}/workers/${workerNameValue}/inbox.md`;
-  await sendToWorker(runtime.sessionName, paneId, `Read and execute your task from: ${relInboxPath}`);
+  const notified = await notifyPaneWithRetry(
+    runtime.sessionName,
+    paneId,
+    `Read and execute your task from: ${relInboxPath}`
+  );
+  if (!notified) {
+    await killWorkerPane(runtime, workerNameValue, paneId);
+    await resetTaskToPending(root, taskId);
+    throw new Error(`worker_notify_failed:${workerNameValue}:initial-inbox`);
+  }
 
   return paneId;
 }
@@ -545,7 +607,12 @@ export async function assignTask(
   const taskPath = join(root, 'tasks', `${taskId}.json`);
 
   // Update task ownership atomically (using file write — task-file-ops withTaskLock not directly applicable here)
-  const task = await readJsonSafe<Record<string, unknown>>(taskPath);
+  const task = await readJsonSafe<TeamTaskRecord>(taskPath);
+  const previousTaskState = task ? {
+    status: task.status,
+    owner: task.owner,
+    assignedAt: task.assignedAt,
+  } : null;
   if (task) {
     task.owner = targetWorkerName;
     task.status = 'in_progress';
@@ -561,7 +628,16 @@ export async function assignTask(
   await appendFile(inboxPath, msg, 'utf-8');
 
   // Send tmux trigger
-  await sendToWorker(sessionName, paneId, `new-task:${taskId}`);
+  const notified = await notifyPaneWithRetry(sessionName, paneId, `new-task:${taskId}`);
+  if (!notified) {
+    if (task && previousTaskState) {
+      task.status = previousTaskState.status;
+      task.owner = previousTaskState.owner;
+      task.assignedAt = previousTaskState.assignedAt;
+      await writeJson(taskPath, task);
+    }
+    throw new Error(`worker_notify_failed:${targetWorkerName}:new-task:${taskId}`);
+  }
 }
 
 /**

@@ -29,6 +29,7 @@ import type { AuditEvent } from './audit-log.js';
 import { getEffectivePermissions, findPermissionViolations } from './permissions.js';
 import type { WorkerPermissions, PermissionViolation } from './permissions.js';
 import { getTeamStatus } from './team-status.js';
+import { measureCharCounts, recordTaskUsage } from './usage-tracker.js';
 
 /** Simple logger */
 function log(message: string): void {
@@ -285,6 +286,31 @@ function readOutputSummary(outputFile: string): string {
   } catch {
     return '(error reading output)';
   }
+}
+
+export function recordTaskCompletionUsage(args: {
+  config: BridgeConfig;
+  taskId: string;
+  promptFile: string;
+  outputFile: string;
+  provider: 'codex' | 'gemini';
+  startedAt: number;
+  startedAtIso: string;
+}): void {
+  const completedAt = new Date().toISOString();
+  const wallClockMs = Math.max(0, Date.now() - args.startedAt);
+  const { promptChars, responseChars } = measureCharCounts(args.promptFile, args.outputFile);
+  recordTaskUsage(args.config.workingDirectory, args.config.teamName, {
+    taskId: args.taskId,
+    workerName: args.config.workerName,
+    provider: args.provider,
+    model: args.config.model ?? 'default',
+    startedAt: args.startedAtIso,
+    completedAt,
+    wallClockMs,
+    promptChars,
+    responseChars,
+  });
 }
 
 /** Maximum accumulated size for parseCodexOutput (1MB) */
@@ -590,8 +616,10 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
         }
 
         // --- 7. Build prompt ---
+        const taskStartedAt = Date.now();
+        const taskStartedAtIso = new Date(taskStartedAt).toISOString();
         const prompt = buildTaskPrompt(task, messages, config);
-        const _promptFile = writePromptFile(config, task.id, prompt);
+        const promptFile = writePromptFile(config, task.id, prompt);
         const outputFile = getOutputPath(config, task.id);
 
         log(`[bridge] Executing task ${task.id}: ${task.subject}`);
@@ -660,6 +688,19 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
               });
 
               log(`[bridge] Task ${task.id} failed: permission violations (enforce mode)`);
+              try {
+                recordTaskCompletionUsage({
+                  config,
+                  taskId: task.id,
+                  promptFile,
+                  outputFile,
+                  provider,
+                  startedAt: taskStartedAt,
+                  startedAtIso: taskStartedAtIso,
+                });
+              } catch (usageErr) {
+                log(`[bridge] usage tracking failed for task ${task.id}: ${(usageErr as Error).message}`);
+              }
               consecutiveErrors = 0; // Not a CLI error, don't count toward quarantine
               // Skip normal completion flow
             } else {
@@ -684,6 +725,20 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
                 timestamp: new Date().toISOString(),
               });
 
+              try {
+                recordTaskCompletionUsage({
+                  config,
+                  taskId: task.id,
+                  promptFile,
+                  outputFile,
+                  provider,
+                  startedAt: taskStartedAt,
+                  startedAtIso: taskStartedAtIso,
+                });
+              } catch (usageErr) {
+                log(`[bridge] usage tracking failed for task ${task.id}: ${(usageErr as Error).message}`);
+              }
+
               log(`[bridge] Task ${task.id} completed (with ${violations.length} audit warning(s))`);
             }
           } else {
@@ -700,6 +755,20 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
               summary,
               timestamp: new Date().toISOString()
             });
+
+            try {
+              recordTaskCompletionUsage({
+                config,
+                taskId: task.id,
+                promptFile,
+                outputFile,
+                provider,
+                startedAt: taskStartedAt,
+                startedAtIso: taskStartedAtIso,
+              });
+            } catch (usageErr) {
+              log(`[bridge] usage tracking failed for task ${task.id}: ${(usageErr as Error).message}`);
+            }
 
             log(`[bridge] Task ${task.id} completed`);
           }
@@ -744,6 +813,20 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
               timestamp: new Date().toISOString()
             });
 
+            try {
+              recordTaskCompletionUsage({
+                config,
+                taskId: task.id,
+                promptFile,
+                outputFile,
+                provider,
+                startedAt: taskStartedAt,
+                startedAtIso: taskStartedAtIso,
+              });
+            } catch (usageErr) {
+              log(`[bridge] usage tracking failed for task ${task.id}: ${(usageErr as Error).message}`);
+            }
+
             log(`[bridge] Task ${task.id} permanently failed after ${attempt} attempts`);
           } else {
             // Retry: set back to pending
@@ -777,7 +860,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
         // Only check when we have no pending task and already notified idle.
         // Guard: if inProgress > 0, other workers are still running — don't shutdown yet.
         try {
-          const teamStatus = getTeamStatus(teamName, workingDirectory);
+          const teamStatus = getTeamStatus(teamName, workingDirectory, 30000, { includeUsage: false });
           if (teamStatus.taskSummary.total > 0 && teamStatus.taskSummary.pending === 0 && teamStatus.taskSummary.inProgress === 0) {
             log(`[bridge] All team tasks complete. Auto-terminating worker.`);
             appendOutbox(teamName, workerName, {

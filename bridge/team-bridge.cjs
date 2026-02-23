@@ -780,6 +780,91 @@ function findPermissionViolations(changedPaths, permissions, cwd) {
 // src/team/team-status.ts
 var import_fs7 = require("fs");
 var import_path8 = require("path");
+
+// src/team/usage-tracker.ts
+var import_node_fs = require("node:fs");
+var import_node_path4 = require("node:path");
+function getUsageLogPath(workingDirectory, teamName) {
+  return (0, import_node_path4.join)(workingDirectory, ".omc", "logs", `team-usage-${teamName}.jsonl`);
+}
+function recordTaskUsage(workingDirectory, teamName, record) {
+  const logPath = getUsageLogPath(workingDirectory, teamName);
+  const dir = (0, import_node_path4.join)(workingDirectory, ".omc", "logs");
+  validateResolvedPath(logPath, workingDirectory);
+  ensureDirWithMode(dir);
+  appendFileWithMode(logPath, JSON.stringify(record) + "\n");
+}
+function measureCharCounts(promptFilePath, outputFilePath) {
+  let promptChars = 0;
+  let responseChars = 0;
+  try {
+    if ((0, import_node_fs.existsSync)(promptFilePath)) {
+      promptChars = (0, import_node_fs.statSync)(promptFilePath).size;
+    }
+  } catch {
+  }
+  try {
+    if ((0, import_node_fs.existsSync)(outputFilePath)) {
+      responseChars = (0, import_node_fs.statSync)(outputFilePath).size;
+    }
+  } catch {
+  }
+  return { promptChars, responseChars };
+}
+function readUsageRecords(workingDirectory, teamName) {
+  const logPath = getUsageLogPath(workingDirectory, teamName);
+  if (!(0, import_node_fs.existsSync)(logPath)) return [];
+  const content = (0, import_node_fs.readFileSync)(logPath, "utf-8");
+  const lines = content.split("\n").filter((l) => l.trim());
+  const records = [];
+  for (const line of lines) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+    }
+  }
+  return records;
+}
+function generateUsageReport(workingDirectory, teamName) {
+  const records = readUsageRecords(workingDirectory, teamName);
+  const workerMap = /* @__PURE__ */ new Map();
+  for (const r of records) {
+    const existing = workerMap.get(r.workerName);
+    if (existing) {
+      existing.taskCount++;
+      existing.totalWallClockMs += r.wallClockMs;
+      existing.totalPromptChars += r.promptChars;
+      existing.totalResponseChars += r.responseChars;
+    } else {
+      workerMap.set(r.workerName, {
+        workerName: r.workerName,
+        provider: r.provider,
+        model: r.model,
+        taskCount: 1,
+        totalWallClockMs: r.wallClockMs,
+        totalPromptChars: r.promptChars,
+        totalResponseChars: r.responseChars
+      });
+    }
+  }
+  const workers = Array.from(workerMap.values());
+  return {
+    teamName,
+    totalWallClockMs: workers.reduce((sum, w) => sum + w.totalWallClockMs, 0),
+    taskCount: workers.reduce((sum, w) => sum + w.taskCount, 0),
+    workers
+  };
+}
+
+// src/team/team-status.ts
+function emptyUsageReport(teamName) {
+  return {
+    teamName,
+    totalWallClockMs: 0,
+    taskCount: 0,
+    workers: []
+  };
+}
 function peekRecentOutboxMessages(teamName, workerName, maxMessages = 10) {
   const safeName = sanitizeName(teamName);
   const safeWorker = sanitizeName(workerName);
@@ -801,14 +886,18 @@ function peekRecentOutboxMessages(teamName, workerName, maxMessages = 10) {
     return [];
   }
 }
-function getTeamStatus(teamName, workingDirectory, heartbeatMaxAgeMs = 3e4) {
+function getTeamStatus(teamName, workingDirectory, heartbeatMaxAgeMs = 3e4, options) {
+  const startedAt = Date.now();
   const mcpWorkers = listMcpWorkers(teamName, workingDirectory);
+  const taskScanStartedAt = Date.now();
   const taskIds = listTaskIds(teamName);
   const tasks = [];
   for (const id of taskIds) {
     const task = readTask(teamName, id);
     if (task) tasks.push(task);
   }
+  const taskScanMs = Date.now() - taskScanStartedAt;
+  const workerScanStartedAt = Date.now();
   const workers = mcpWorkers.map((w) => {
     const heartbeat = readHeartbeat(workingDirectory, teamName, w.name);
     const alive = isWorkerAlive(workingDirectory, teamName, w.name, heartbeatMaxAgeMs);
@@ -833,6 +922,15 @@ function getTeamStatus(teamName, workingDirectory, heartbeatMaxAgeMs = 3e4) {
       taskStats
     };
   });
+  const workerScanMs = Date.now() - workerScanStartedAt;
+  const includeUsage = options?.includeUsage ?? true;
+  let usage = emptyUsageReport(teamName);
+  let usageReadMs = 0;
+  if (includeUsage) {
+    const usageReadStartedAt = Date.now();
+    usage = generateUsageReport(workingDirectory, teamName);
+    usageReadMs = Date.now() - usageReadStartedAt;
+  }
   const totalFailed = tasks.filter((t) => t.status === "completed" && t.metadata?.permanentlyFailed === true).length;
   const taskSummary = {
     total: tasks.length,
@@ -845,6 +943,13 @@ function getTeamStatus(teamName, workingDirectory, heartbeatMaxAgeMs = 3e4) {
     teamName,
     workers,
     taskSummary,
+    usage,
+    performance: {
+      taskScanMs,
+      workerScanMs,
+      usageReadMs,
+      totalMs: Date.now() - startedAt
+    },
     lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
@@ -1033,6 +1138,22 @@ function readOutputSummary(outputFile) {
   } catch {
     return "(error reading output)";
   }
+}
+function recordTaskCompletionUsage(args) {
+  const completedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const wallClockMs = Math.max(0, Date.now() - args.startedAt);
+  const { promptChars, responseChars } = measureCharCounts(args.promptFile, args.outputFile);
+  recordTaskUsage(args.config.workingDirectory, args.config.teamName, {
+    taskId: args.taskId,
+    workerName: args.config.workerName,
+    provider: args.provider,
+    model: args.config.model ?? "default",
+    startedAt: args.startedAtIso,
+    completedAt,
+    wallClockMs,
+    promptChars,
+    responseChars
+  });
 }
 var MAX_CODEX_OUTPUT_SIZE = 1024 * 1024;
 function parseCodexOutput(output) {
@@ -1252,8 +1373,10 @@ async function runBridge(config) {
           await handleShutdown(config, shutdownBeforeSpawn, null);
           return;
         }
+        const taskStartedAt = Date.now();
+        const taskStartedAtIso = new Date(taskStartedAt).toISOString();
         const prompt = buildTaskPrompt(task, messages, config);
-        const _promptFile = writePromptFile(config, task.id, prompt);
+        const promptFile = writePromptFile(config, task.id, prompt);
         const outputFile = getOutputPath(config, task.id);
         log(`[bridge] Executing task ${task.id}: ${task.subject}`);
         try {
@@ -1307,6 +1430,19 @@ ${violationSummary}`,
                 timestamp: (/* @__PURE__ */ new Date()).toISOString()
               });
               log(`[bridge] Task ${task.id} failed: permission violations (enforce mode)`);
+              try {
+                recordTaskCompletionUsage({
+                  config,
+                  taskId: task.id,
+                  promptFile,
+                  outputFile,
+                  provider,
+                  startedAt: taskStartedAt,
+                  startedAtIso: taskStartedAtIso
+                });
+              } catch (usageErr) {
+                log(`[bridge] usage tracking failed for task ${task.id}: ${usageErr.message}`);
+              }
               consecutiveErrors = 0;
             } else {
               audit(config, "permission_audit", task.id, {
@@ -1326,6 +1462,19 @@ ${violationSummary}`);
 [AUDIT WARNING: ${violations.length} permission violation(s) detected]`,
                 timestamp: (/* @__PURE__ */ new Date()).toISOString()
               });
+              try {
+                recordTaskCompletionUsage({
+                  config,
+                  taskId: task.id,
+                  promptFile,
+                  outputFile,
+                  provider,
+                  startedAt: taskStartedAt,
+                  startedAtIso: taskStartedAtIso
+                });
+              } catch (usageErr) {
+                log(`[bridge] usage tracking failed for task ${task.id}: ${usageErr.message}`);
+              }
               log(`[bridge] Task ${task.id} completed (with ${violations.length} audit warning(s))`);
             }
           } else {
@@ -1339,6 +1488,19 @@ ${violationSummary}`);
               summary,
               timestamp: (/* @__PURE__ */ new Date()).toISOString()
             });
+            try {
+              recordTaskCompletionUsage({
+                config,
+                taskId: task.id,
+                promptFile,
+                outputFile,
+                provider,
+                startedAt: taskStartedAt,
+                startedAtIso: taskStartedAtIso
+              });
+            } catch (usageErr) {
+              log(`[bridge] usage tracking failed for task ${task.id}: ${usageErr.message}`);
+            }
             log(`[bridge] Task ${task.id} completed`);
           }
         } catch (err) {
@@ -1370,6 +1532,19 @@ ${violationSummary}`);
               error: `Task permanently failed after ${attempt} attempts: ${errorMsg}`,
               timestamp: (/* @__PURE__ */ new Date()).toISOString()
             });
+            try {
+              recordTaskCompletionUsage({
+                config,
+                taskId: task.id,
+                promptFile,
+                outputFile,
+                provider,
+                startedAt: taskStartedAt,
+                startedAtIso: taskStartedAtIso
+              });
+            } catch (usageErr) {
+              log(`[bridge] usage tracking failed for task ${task.id}: ${usageErr.message}`);
+            }
             log(`[bridge] Task ${task.id} permanently failed after ${attempt} attempts`);
           } else {
             updateTask(teamName, task.id, { status: "pending" });
@@ -1394,7 +1569,7 @@ ${violationSummary}`);
           idleNotified = true;
         }
         try {
-          const teamStatus = getTeamStatus(teamName, workingDirectory);
+          const teamStatus = getTeamStatus(teamName, workingDirectory, 3e4, { includeUsage: false });
           if (teamStatus.taskSummary.total > 0 && teamStatus.taskSummary.pending === 0 && teamStatus.taskSummary.inProgress === 0) {
             log(`[bridge] All team tasks complete. Auto-terminating worker.`);
             appendOutbox(teamName, workerName, {

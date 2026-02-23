@@ -44,6 +44,11 @@ export interface TeamSnapshot {
         failed: number;
     };
     deadWorkers: string[];
+    monitorPerformance: {
+        listTasksMs: number;
+        workerScanMs: number;
+        totalMs: number;
+    };
 }
 export interface WatchdogCompletionEvent {
     workerName: string;

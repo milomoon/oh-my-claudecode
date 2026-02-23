@@ -258,10 +258,40 @@ function paneHasActiveTask(captured) {
   if (tail.some((l) => /\bbackground terminal running\b/i.test(l))) return true;
   return false;
 }
+function paneLooksReady(captured) {
+  const lines = captured.split("\n").map((line) => line.replace(/\r/g, "").trim()).filter((line) => line.length > 0);
+  if (lines.length === 0) return false;
+  const tail = lines.slice(-20);
+  const hasPrompt = tail.some((line) => /^\s*[›>❯]\s*/u.test(line));
+  if (hasPrompt) return true;
+  const hasCodexHint = tail.some(
+    (line) => /\bgpt-[\w.-]+\b/i.test(line) || /\b\d+% left\b/i.test(line)
+  );
+  return hasCodexHint;
+}
 function paneTailContainsLiteralLine(captured, text) {
   return normalizeTmuxCapture(captured).includes(normalizeTmuxCapture(text));
 }
-async function sendToWorker(sessionName, paneId, message) {
+async function paneInCopyMode(paneId, execFileAsync) {
+  try {
+    const result = await execFileAsync("tmux", ["display-message", "-t", paneId, "-p", "#{pane_in_mode}"]);
+    return result.stdout.trim() === "1";
+  } catch {
+    return false;
+  }
+}
+function shouldAttemptAdaptiveRetry(args) {
+  if (process.env.OMX_TEAM_AUTO_INTERRUPT_RETRY === "0") return false;
+  if (args.retriesAttempted >= 1) return false;
+  if (args.paneInCopyMode) return false;
+  if (!args.paneBusy) return false;
+  if (typeof args.latestCapture !== "string") return false;
+  if (!paneTailContainsLiteralLine(args.latestCapture, args.message)) return false;
+  if (paneHasActiveTask(args.latestCapture)) return false;
+  if (!paneLooksReady(args.latestCapture)) return false;
+  return true;
+}
+async function sendToWorker(_sessionName, paneId, message) {
   if (message.length > 200) {
     console.warn(`[tmux-session] sendToWorker: message truncated to 200 chars`);
     message = message.slice(0, 200);
@@ -274,6 +304,9 @@ async function sendToWorker(sessionName, paneId, message) {
     const sendKey = async (key) => {
       await execFileAsync("tmux", ["send-keys", "-t", paneId, key]);
     };
+    if (await paneInCopyMode(paneId, execFileAsync)) {
+      return false;
+    }
     const initialCapture = await capturePaneAsync(paneId, execFileAsync);
     const paneBusy = paneHasActiveTask(initialCapture);
     if (paneHasTrustPrompt(initialCapture)) {
@@ -300,6 +333,40 @@ async function sendToWorker(sessionName, paneId, message) {
       const checkCapture = await capturePaneAsync(paneId, execFileAsync);
       if (!paneTailContainsLiteralLine(checkCapture, message)) return true;
       await sleep(140);
+    }
+    if (await paneInCopyMode(paneId, execFileAsync)) {
+      return false;
+    }
+    const finalCapture = await capturePaneAsync(paneId, execFileAsync);
+    const paneModeBeforeAdaptiveRetry = await paneInCopyMode(paneId, execFileAsync);
+    if (shouldAttemptAdaptiveRetry({
+      paneBusy,
+      latestCapture: finalCapture,
+      message,
+      paneInCopyMode: paneModeBeforeAdaptiveRetry,
+      retriesAttempted: 0
+    })) {
+      if (await paneInCopyMode(paneId, execFileAsync)) {
+        return false;
+      }
+      await sendKey("C-u");
+      await sleep(80);
+      if (await paneInCopyMode(paneId, execFileAsync)) {
+        return false;
+      }
+      await execFileAsync("tmux", ["send-keys", "-t", paneId, "-l", "--", message]);
+      await sleep(120);
+      for (let round = 0; round < 4; round++) {
+        await sendKey("C-m");
+        await sleep(180);
+        await sendKey("C-m");
+        await sleep(140);
+        const retryCapture = await capturePaneAsync(paneId, execFileAsync);
+        if (!paneTailContainsLiteralLine(retryCapture, message)) return true;
+      }
+    }
+    if (await paneInCopyMode(paneId, execFileAsync)) {
+      return false;
     }
     await sendKey("C-m");
     await sleep(120);
@@ -557,6 +624,14 @@ async function markTaskInProgress(root, taskId, owner) {
   await writeTask(root, task);
   return true;
 }
+async function resetTaskToPending(root, taskId) {
+  const task = await readTask(root, taskId);
+  if (!task) return;
+  task.status = "pending";
+  task.owner = null;
+  task.assignedAt = void 0;
+  await writeTask(root, task);
+}
 async function markTaskFromDone(root, taskId, status, summary) {
   const task = await readTask(root, taskId);
   if (!task) return;
@@ -587,6 +662,17 @@ async function nextPendingTaskIndex(runtime) {
     if (task?.status === "pending") return i;
   }
   return null;
+}
+async function notifyPaneWithRetry(sessionName, paneId, message, maxAttempts = 6, retryDelayMs = 350) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (await sendToWorker(sessionName, paneId, message)) {
+      return true;
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
+  }
+  return false;
 }
 async function allTasksTerminal(runtime) {
   const root = stateRoot(runtime.cwd, runtime.teamName);
@@ -670,7 +756,9 @@ async function startTeam(config) {
   return runtime;
 }
 async function monitorTeam(teamName, cwd, workerPaneIds) {
+  const monitorStartedAt = Date.now();
   const root = stateRoot(cwd, teamName);
+  const taskScanStartedAt = Date.now();
   const taskCounts = { pending: 0, inProgress: 0, completed: 0, failed: 0 };
   try {
     const { readdir } = await import("fs/promises");
@@ -684,6 +772,8 @@ async function monitorTeam(teamName, cwd, workerPaneIds) {
     }
   } catch {
   }
+  const listTasksMs = Date.now() - taskScanStartedAt;
+  const workerScanStartedAt = Date.now();
   const workers = [];
   const deadWorkers = [];
   for (let i = 0; i < workerPaneIds.length; i++) {
@@ -708,6 +798,7 @@ async function monitorTeam(teamName, cwd, workerPaneIds) {
     workers.push(status);
     if (!alive) deadWorkers.push(wName);
   }
+  const workerScanMs = Date.now() - workerScanStartedAt;
   let phase = "executing";
   if (taskCounts.inProgress === 0 && taskCounts.pending > 0 && taskCounts.completed === 0) {
     phase = "planning";
@@ -716,7 +807,18 @@ async function monitorTeam(teamName, cwd, workerPaneIds) {
   } else if (taskCounts.completed > 0 && taskCounts.pending === 0 && taskCounts.inProgress === 0 && taskCounts.failed === 0) {
     phase = "completed";
   }
-  return { teamName, phase, workers, taskCounts, deadWorkers };
+  return {
+    teamName,
+    phase,
+    workers,
+    taskCounts,
+    deadWorkers,
+    monitorPerformance: {
+      listTasksMs,
+      workerScanMs,
+      totalMs: Date.now() - monitorStartedAt
+    }
+  };
 }
 function watchdogCliWorkers(runtime, intervalMs) {
   let tickInFlight = false;
@@ -819,13 +921,27 @@ async function spawnWorkerForTask(runtime, workerNameValue, taskIndex) {
   }
   await new Promise((r) => setTimeout(r, 4e3));
   if (agentType === "gemini") {
-    await sendToWorker(runtime.sessionName, paneId, "1");
+    const confirmed = await notifyPaneWithRetry(runtime.sessionName, paneId, "1");
+    if (!confirmed) {
+      await killWorkerPane(runtime, workerNameValue, paneId);
+      await resetTaskToPending(root, taskId);
+      throw new Error(`worker_notify_failed:${workerNameValue}:trust-confirm`);
+    }
     await new Promise((r) => setTimeout(r, 800));
   }
   const instruction = buildInitialTaskInstruction(runtime.teamName, workerNameValue, task, taskId);
   await composeInitialInbox(runtime.teamName, workerNameValue, instruction, runtime.cwd);
   const relInboxPath = `.omc/state/team/${runtime.teamName}/workers/${workerNameValue}/inbox.md`;
-  await sendToWorker(runtime.sessionName, paneId, `Read and execute your task from: ${relInboxPath}`);
+  const notified = await notifyPaneWithRetry(
+    runtime.sessionName,
+    paneId,
+    `Read and execute your task from: ${relInboxPath}`
+  );
+  if (!notified) {
+    await killWorkerPane(runtime, workerNameValue, paneId);
+    await resetTaskToPending(root, taskId);
+    throw new Error(`worker_notify_failed:${workerNameValue}:initial-inbox`);
+  }
   return paneId;
 }
 async function killWorkerPane(runtime, workerNameValue, paneId) {
@@ -1035,7 +1151,7 @@ async function main() {
 `);
     }
     process.stderr.write(
-      `[runtime-cli] phase=${snap.phase} pending=${snap.taskCounts.pending} inProgress=${snap.taskCounts.inProgress} completed=${snap.taskCounts.completed} failed=${snap.taskCounts.failed} dead=${snap.deadWorkers.length}
+      `[runtime-cli] phase=${snap.phase} pending=${snap.taskCounts.pending} inProgress=${snap.taskCounts.inProgress} completed=${snap.taskCounts.completed} failed=${snap.taskCounts.failed} dead=${snap.deadWorkers.length} monitorMs=${snap.monitorPerformance.totalMs} tasksMs=${snap.monitorPerformance.listTasksMs} workerMs=${snap.monitorPerformance.workerScanMs}
 `
     );
     if (snap.phase === "completed") {

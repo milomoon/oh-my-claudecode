@@ -51,6 +51,13 @@ export declare function createTeamSession(teamName: string, workerCount: number,
  * Worker startup: env OMC_TEAM_WORKER={teamName}/workerName shell -lc "exec agentCmd"
  */
 export declare function spawnWorkerInPane(sessionName: string, paneId: string, config: WorkerPaneConfig): Promise<void>;
+export declare function shouldAttemptAdaptiveRetry(args: {
+    paneBusy: boolean;
+    latestCapture: string | null;
+    message: string;
+    paneInCopyMode: boolean;
+    retriesAttempted: number;
+}): boolean;
 /**
  * Send a short trigger message to a worker via tmux send-keys.
  * Uses robust C-m double-press with delays to ensure the message is submitted.
@@ -58,7 +65,7 @@ export declare function spawnWorkerInPane(sessionName: string, paneId: string, c
  * Message must be < 200 chars.
  * Returns false on error (does not throw).
  */
-export declare function sendToWorker(sessionName: string, paneId: string, message: string): Promise<boolean>;
+export declare function sendToWorker(_sessionName: string, paneId: string, message: string): Promise<boolean>;
 /**
  * Inject a status message into the leader Claude pane.
  * The message is typed into the leader's input, triggering a new conversation turn.

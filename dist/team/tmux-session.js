@@ -243,8 +243,50 @@ function paneHasActiveTask(captured) {
         return true;
     return false;
 }
+function paneLooksReady(captured) {
+    const lines = captured
+        .split('\n')
+        .map(line => line.replace(/\r/g, '').trim())
+        .filter(line => line.length > 0);
+    if (lines.length === 0)
+        return false;
+    const tail = lines.slice(-20);
+    const hasPrompt = tail.some(line => /^\s*[›>❯]\s*/u.test(line));
+    if (hasPrompt)
+        return true;
+    const hasCodexHint = tail.some(line => /\bgpt-[\w.-]+\b/i.test(line) || /\b\d+% left\b/i.test(line));
+    return hasCodexHint;
+}
 function paneTailContainsLiteralLine(captured, text) {
     return normalizeTmuxCapture(captured).includes(normalizeTmuxCapture(text));
+}
+async function paneInCopyMode(paneId, execFileAsync) {
+    try {
+        const result = await execFileAsync('tmux', ['display-message', '-t', paneId, '-p', '#{pane_in_mode}']);
+        return result.stdout.trim() === '1';
+    }
+    catch {
+        return false;
+    }
+}
+export function shouldAttemptAdaptiveRetry(args) {
+    if (process.env.OMX_TEAM_AUTO_INTERRUPT_RETRY === '0')
+        return false;
+    if (args.retriesAttempted >= 1)
+        return false;
+    if (args.paneInCopyMode)
+        return false;
+    if (!args.paneBusy)
+        return false;
+    if (typeof args.latestCapture !== 'string')
+        return false;
+    if (!paneTailContainsLiteralLine(args.latestCapture, args.message))
+        return false;
+    if (paneHasActiveTask(args.latestCapture))
+        return false;
+    if (!paneLooksReady(args.latestCapture))
+        return false;
+    return true;
 }
 /**
  * Send a short trigger message to a worker via tmux send-keys.
@@ -253,7 +295,7 @@ function paneTailContainsLiteralLine(captured, text) {
  * Message must be < 200 chars.
  * Returns false on error (does not throw).
  */
-export async function sendToWorker(sessionName, paneId, message) {
+export async function sendToWorker(_sessionName, paneId, message) {
     if (message.length > 200) {
         console.warn(`[tmux-session] sendToWorker: message truncated to 200 chars`);
         message = message.slice(0, 200);
@@ -266,6 +308,10 @@ export async function sendToWorker(sessionName, paneId, message) {
         const sendKey = async (key) => {
             await execFileAsync('tmux', ['send-keys', '-t', paneId, key]);
         };
+        // Guard: copy-mode captures keys; skip injection entirely.
+        if (await paneInCopyMode(paneId, execFileAsync)) {
+            return false;
+        }
         // Check for trust prompt and auto-dismiss before sending our text
         const initialCapture = await capturePaneAsync(paneId, execFileAsync);
         const paneBusy = paneHasActiveTask(initialCapture);
@@ -301,7 +347,45 @@ export async function sendToWorker(sessionName, paneId, message) {
                 return true;
             await sleep(140);
         }
-        // Fail-open: one last nudge, then continue regardless
+        // Safety gate: copy-mode can turn on while we retry; never send fallback control keys when active.
+        if (await paneInCopyMode(paneId, execFileAsync)) {
+            return false;
+        }
+        // Adaptive fallback: for busy panes, retry once without interrupting active turns.
+        const finalCapture = await capturePaneAsync(paneId, execFileAsync);
+        const paneModeBeforeAdaptiveRetry = await paneInCopyMode(paneId, execFileAsync);
+        if (shouldAttemptAdaptiveRetry({
+            paneBusy,
+            latestCapture: finalCapture,
+            message,
+            paneInCopyMode: paneModeBeforeAdaptiveRetry,
+            retriesAttempted: 0,
+        })) {
+            if (await paneInCopyMode(paneId, execFileAsync)) {
+                return false;
+            }
+            await sendKey('C-u');
+            await sleep(80);
+            if (await paneInCopyMode(paneId, execFileAsync)) {
+                return false;
+            }
+            await execFileAsync('tmux', ['send-keys', '-t', paneId, '-l', '--', message]);
+            await sleep(120);
+            for (let round = 0; round < 4; round++) {
+                await sendKey('C-m');
+                await sleep(180);
+                await sendKey('C-m');
+                await sleep(140);
+                const retryCapture = await capturePaneAsync(paneId, execFileAsync);
+                if (!paneTailContainsLiteralLine(retryCapture, message))
+                    return true;
+            }
+        }
+        // Before fallback control keys, re-check copy-mode to avoid mutating scrollback UI state.
+        if (await paneInCopyMode(paneId, execFileAsync)) {
+            return false;
+        }
+        // Fail-open: one last nudge, then continue regardless.
         await sendKey('C-m');
         await sleep(120);
         await sendKey('C-m');
@@ -326,6 +410,9 @@ export async function injectToLeaderPane(sessionName, leaderPaneId, message) {
         const { execFile } = await import('child_process');
         const { promisify } = await import('util');
         const execFileAsync = promisify(execFile);
+        if (await paneInCopyMode(leaderPaneId, execFileAsync)) {
+            return false;
+        }
         const captured = await capturePaneAsync(leaderPaneId, execFileAsync);
         if (paneHasActiveTask(captured)) {
             await execFileAsync('tmux', ['send-keys', '-t', leaderPaneId, 'C-c']);

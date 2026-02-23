@@ -1,8 +1,6 @@
 import { mkdir, appendFile } from 'fs/promises';
 import { join } from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-const execFileAsync = promisify(execFile);
+import { sendToWorker } from './tmux-session.js';
 /**
  * Send a short trigger to a worker via tmux send-keys.
  * Uses literal mode (-l) to avoid stdin buffer interference.
@@ -14,9 +12,7 @@ export async function sendTmuxTrigger(paneId, triggerType, payload) {
     const message = payload ? `${triggerType}:${payload}` : triggerType;
     const truncated = message.length > 200 ? message.slice(0, 200) : message;
     try {
-        await execFileAsync('tmux', ['send-keys', '-t', paneId, '-l', truncated]);
-        await execFileAsync('tmux', ['send-keys', '-t', paneId, 'Enter']);
-        return true;
+        return await sendToWorker('', paneId, truncated);
     }
     catch {
         return false;

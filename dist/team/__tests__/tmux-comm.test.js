@@ -1,43 +1,26 @@
 import { describe, it, expect, vi } from 'vitest';
 import { sendTmuxTrigger } from '../tmux-comm.js';
-// Mock child_process
-vi.mock('child_process', () => ({
-    execFile: vi.fn(),
-}));
-vi.mock('util', () => ({
-    promisify: (fn) => (...args) => {
-        return new Promise((resolve, reject) => {
-            fn(...args, (err, stdout) => {
-                if (err)
-                    reject(err);
-                else
-                    resolve({ stdout: stdout ?? '', stderr: '' });
-            });
-        });
-    },
+import { sendToWorker } from '../tmux-session.js';
+vi.mock('../tmux-session.js', () => ({
+    sendToWorker: vi.fn(),
 }));
 describe('sendTmuxTrigger', () => {
+    it('delegates to sendToWorker robust path', async () => {
+        vi.mocked(sendToWorker).mockResolvedValueOnce(true);
+        const result = await sendTmuxTrigger('%1', 'check-inbox');
+        expect(result).toBe(true);
+        expect(sendToWorker).toHaveBeenCalledWith('', '%1', 'check-inbox');
+    });
     it('returns false on tmux error (does not throw)', async () => {
-        const { execFile } = await import('child_process');
-        execFile.mockImplementation((...args) => {
-            const cb = args[args.length - 1];
-            cb(new Error('tmux not found'));
-        });
+        vi.mocked(sendToWorker).mockRejectedValueOnce(new Error('tmux not found'));
         const result = await sendTmuxTrigger('%99', 'check-inbox');
         expect(result).toBe(false);
     });
     it('truncates messages over 200 chars', async () => {
-        const { execFile } = await import('child_process');
-        const calls = [];
-        execFile.mockImplementation((...args) => {
-            calls.push(args);
-            const cb = args[args.length - 1];
-            cb(null, '');
-        });
+        vi.mocked(sendToWorker).mockResolvedValueOnce(true);
         const longMsg = 'a'.repeat(300);
         await sendTmuxTrigger('%1', longMsg);
-        const sentMessage = calls[0][1][4]; // execFile('tmux', ['send-keys', '-t', paneId, '-l', msg], cb) → args[1][4]
-        expect(sentMessage.length).toBeLessThanOrEqual(200);
+        expect(sendToWorker).toHaveBeenCalledWith('', '%1', 'a'.repeat(200));
     });
 });
 //# sourceMappingURL=tmux-comm.test.js.map
