@@ -4,6 +4,7 @@ import * as readline from 'readline';
 import { triggerStopCallbacks } from './callbacks.js';
 import { notify } from '../../notifications/index.js';
 import { cleanupBridgeSessions } from '../../tools/python-repl/bridge-manager.js';
+import { resolveToWorktreeRoot } from '../../lib/worktree-paths.js';
 
 export interface SessionEndInput {
   session_id: string;
@@ -416,17 +417,21 @@ export function exportSessionSummary(directory: string, metrics: SessionMetrics)
  * Process session end
  */
 export async function processSessionEnd(input: SessionEndInput): Promise<HookOutput> {
+  // Normalize cwd to the git worktree root so .omc/state/ is always resolved
+  // from the repo root, even when Claude Code is running from a subdirectory (issue #891).
+  const directory = resolveToWorktreeRoot(input.cwd);
+
   // Record and export session metrics to disk
-  const metrics = recordSessionMetrics(input.cwd, input);
-  exportSessionSummary(input.cwd, metrics);
+  const metrics = recordSessionMetrics(directory, input);
+  exportSessionSummary(directory, metrics);
 
   // Clean up transient state files
-  cleanupTransientState(input.cwd);
+  cleanupTransientState(directory);
 
   // Clean up mode state files to prevent stale state issues
   // This ensures the stop hook won't malfunction in subsequent sessions
   // Pass session_id to only clean up this session's states
-  cleanupModeStates(input.cwd, input.session_id);
+  cleanupModeStates(directory, input.session_id);
 
   // Clean up Python REPL bridge sessions used in this transcript (#641).
   // Best-effort only: session end should not fail because cleanup fails.
