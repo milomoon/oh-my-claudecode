@@ -35,6 +35,13 @@ vi.mock('os', async () => {
 
 const TEST_STATE_DIR = '/project/.omc/state';
 const COOLDOWN_PATH = join(TEST_STATE_DIR, 'idle-notif-cooldown.json');
+const TEST_SESSION_ID = 'session-123';
+const SESSION_COOLDOWN_PATH = join(
+  TEST_STATE_DIR,
+  'sessions',
+  TEST_SESSION_ID,
+  'idle-notif-cooldown.json'
+);
 const CONFIG_PATH = '/home/testuser/.omc/config.json';
 
 describe('getIdleNotificationCooldownSeconds', () => {
@@ -238,6 +245,24 @@ describe('shouldSendIdleNotification', () => {
     expect(shouldSendIdleNotification(TEST_STATE_DIR)).toBe(true);
   });
 
+  it('uses session-scoped cooldown file when sessionId is provided', () => {
+    const recentTimestamp = new Date(Date.now() - 10_000).toISOString(); // 10s ago
+    (existsSync as ReturnType<typeof vi.fn>).mockImplementation((p: string) => {
+      if (p === CONFIG_PATH) return true;
+      if (p === SESSION_COOLDOWN_PATH) return true;
+      return false;
+    });
+    (readFileSync as ReturnType<typeof vi.fn>).mockImplementation((p: string) => {
+      if (p === CONFIG_PATH) {
+        return JSON.stringify({ notificationCooldown: { sessionIdleSeconds: 30 } });
+      }
+      if (p === SESSION_COOLDOWN_PATH) return JSON.stringify({ lastSentAt: recentTimestamp });
+      throw new Error('not found');
+    });
+
+    expect(shouldSendIdleNotification(TEST_STATE_DIR, TEST_SESSION_ID)).toBe(false);
+  });
+
   it('blocks notification when within custom shorter cooldown', () => {
     const recentTimestamp = new Date(Date.now() - 10_000).toISOString(); // 10s ago
     (existsSync as ReturnType<typeof vi.fn>).mockImplementation((p: string) => {
@@ -295,6 +320,16 @@ describe('recordIdleNotificationSent', () => {
     const ts = new Date(written.lastSentAt).getTime();
     expect(ts).toBeGreaterThanOrEqual(before);
     expect(ts).toBeLessThanOrEqual(after);
+  });
+
+  it('writes session-scoped cooldown file when sessionId is provided', () => {
+    (existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+    recordIdleNotificationSent(TEST_STATE_DIR, TEST_SESSION_ID);
+
+    expect(mkdirSync).toHaveBeenCalledWith(join(TEST_STATE_DIR, 'sessions', TEST_SESSION_ID), { recursive: true });
+    const [calledPath] = (writeFileSync as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(calledPath).toBe(SESSION_COOLDOWN_PATH);
   });
 
   it('creates state directory if it does not exist', () => {
