@@ -528,6 +528,7 @@ async function processPersistentMode(input: HookInput): Promise<HookOutput> {
 
   // Lazy-load persistent-mode and todo-continuation modules
   const { checkPersistentModes, createHookOutput, shouldSendIdleNotification, recordIdleNotificationSent } = await import("./persistent-mode/index.js");
+  const { isExplicitCancelCommand } = await import("./todo-continuation/index.js");
 
   // Extract stop context for abort detection (supports both camelCase and snake_case)
   const stopContext: StopContext = {
@@ -588,6 +589,11 @@ async function processPersistentMode(input: HookInput): Promise<HookOutput> {
       // Stop can fire for normal "idle" turns while the session is still active.
       // Reply cleanup is handled in the true SessionEnd hook only.
     }
+    return output;
+  }
+
+  // Explicit cancel should suppress team continuation prompts.
+  if (isExplicitCancelCommand(stopContext)) {
     return output;
   }
 
