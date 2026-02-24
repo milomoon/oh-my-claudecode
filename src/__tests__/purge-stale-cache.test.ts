@@ -31,7 +31,8 @@ function dirent(name: string): { name: string; isDirectory: () => boolean } {
   return { name, isDirectory: () => true };
 }
 
-/** Return a stat result with mtime N ms ago */
+/** Return a stat result with mtime N ms ago.
+ * Default must exceed STALE_THRESHOLD_MS (24 h) in src/utils/paths.ts. */
 function staleStats(ageMs: number = 25 * 60 * 60 * 1000) {
   return { mtimeMs: Date.now() - ageMs } as ReturnType<typeof statSync>;
 }
