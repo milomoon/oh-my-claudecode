@@ -109,7 +109,17 @@ async function readJsonSafe<T>(filePath: string): Promise<T | null> {
     const content = await readFile(filePath, 'utf-8');
     return JSON.parse(content) as T;
   } catch {
-    return null;
+    // Gemini CLI sometimes replaces double-quotes with backslashes in JSON output.
+    // Only attempt recovery when the content has no double-quotes at all (total
+    // substitution), to avoid destroying legitimate escape sequences.
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      if (content.includes('"')) return null;
+      const recovered = content.replace(/\\/g, '"');
+      return JSON.parse(recovered) as T;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -248,6 +258,7 @@ function buildInitialTaskInstruction(
   taskId: string
 ): string {
   const donePath = `.omc/state/team/${teamName}/workers/${workerName}/done.json`;
+  const doneDir = `.omc/state/team/${teamName}/workers/${workerName}`;
   return [
     `## Initial Task Assignment`,
     `Task ID: ${taskId}`,
@@ -256,8 +267,10 @@ function buildInitialTaskInstruction(
     ``,
     task.description,
     ``,
-    `When complete, write done signal to ${donePath}:`,
-    `{"taskId":"${taskId}","status":"completed","summary":"<brief summary>","completedAt":"<ISO timestamp>"}`,
+    `When complete, write done signal using a bash command (do NOT use a file-write tool):`,
+    '```bash',
+    `mkdir -p ${doneDir} && echo '{"taskId":"${taskId}","status":"completed","summary":"done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > ${donePath}`,
+    '```',
     ``,
     `IMPORTANT: Execute ONLY the task assigned to you in this inbox. After writing done.json, exit immediately. Do not read from the task directory or claim other tasks.`,
   ].join('\n');
