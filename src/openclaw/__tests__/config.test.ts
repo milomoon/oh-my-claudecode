@@ -147,7 +147,7 @@ describe("resolveGateway", () => {
     const result = resolveGateway(validConfig, "session-start");
     expect(result).not.toBeNull();
     expect(result!.gatewayName).toBe("my-gateway");
-    expect(result!.gateway.url).toBe("https://example.com/wake");
+    expect((result!.gateway as { url: string }).url).toBe("https://example.com/wake");
     expect(result!.instruction).toBe("Session started for {{projectName}}");
   });
 
