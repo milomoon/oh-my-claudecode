@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { join } from 'path';
 import { DEFAULT_CONFIG } from './types.js';
 import { resolveSessionStatePath, ensureSessionStateDir, getOmcRoot } from '../../lib/worktree-paths.js';
+import { writeModeState, readModeState } from '../../lib/mode-state-io.js';
 const STATE_FILE = 'ultrapilot-state.json';
 const OWNERSHIP_FILE = 'ultrapilot-ownership.json';
 /**
@@ -49,45 +50,13 @@ function ensureStateDir(directory, sessionId) {
  * Read ultrapilot state from disk
  */
 export function readUltrapilotState(directory, sessionId) {
-    // Try session-scoped path first
-    if (sessionId) {
-        const sessionFile = getStateFilePath(directory, sessionId);
-        if (existsSync(sessionFile)) {
-            try {
-                const content = readFileSync(sessionFile, 'utf-8');
-                return JSON.parse(content);
-            }
-            catch {
-                // Fall through to legacy path
-            }
-        }
-    }
-    // Fallback to legacy path
-    const stateFile = getStateFilePath(directory);
-    if (!existsSync(stateFile)) {
-        return null;
-    }
-    try {
-        const content = readFileSync(stateFile, 'utf-8');
-        return JSON.parse(content);
-    }
-    catch {
-        return null;
-    }
+    return readModeState('ultrapilot', directory, sessionId);
 }
 /**
  * Write ultrapilot state to disk
  */
 export function writeUltrapilotState(directory, state, sessionId) {
-    try {
-        ensureStateDir(directory, sessionId);
-        const stateFile = getStateFilePath(directory, sessionId);
-        writeFileSync(stateFile, JSON.stringify(state, null, 2));
-        return true;
-    }
-    catch {
-        return false;
-    }
+    return writeModeState('ultrapilot', state, directory, sessionId);
 }
 /**
  * Clear ultrapilot state

@@ -32,6 +32,7 @@ export const TOOL_CATEGORIES = {
     INTEROP: 'interop',
     CODEX: 'codex',
     GEMINI: 'gemini',
+    SHARED_MEMORY: 'shared-memory',
 };
 // Hook event names
 export const HOOK_EVENTS = {

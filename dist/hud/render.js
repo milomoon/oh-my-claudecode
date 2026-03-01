@@ -22,6 +22,7 @@ import { renderAutopilot } from './elements/autopilot.js';
 import { renderCwd } from './elements/cwd.js';
 import { renderGitRepo, renderGitBranch } from './elements/git.js';
 import { renderModel } from './elements/model.js';
+import { renderApiKeySource } from './elements/api-key-source.js';
 import { renderCallCounts } from './elements/call-counts.js';
 import { renderContextLimitWarning } from './elements/context-warning.js';
 /**
@@ -124,6 +125,12 @@ export async function render(context, config) {
         const modelElement = renderModel(context.modelName, enabledElements.modelFormat);
         if (modelElement)
             gitElements.push(modelElement);
+    }
+    // API key source
+    if (enabledElements.apiKeySource && context.apiKeySource) {
+        const keySource = renderApiKeySource(context.apiKeySource);
+        if (keySource)
+            gitElements.push(keySource);
     }
     // [OMC#X.Y.Z] label with optional update notification
     if (enabledElements.omcLabel) {

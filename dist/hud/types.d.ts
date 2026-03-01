@@ -4,7 +4,8 @@
  * Type definitions for the HUD state, configuration, and rendering.
  */
 import type { AutopilotStateForHud } from './elements/autopilot.js';
-export type { AutopilotStateForHud };
+import type { ApiKeySource } from './elements/api-key-source.js';
+export type { AutopilotStateForHud, ApiKeySource };
 export interface BackgroundTask {
     id: string;
     description: string;
@@ -230,6 +231,8 @@ export interface HudRenderContext {
     skillCallCount: number;
     /** Last prompt submission time (from HUD state) */
     promptTime: Date | null;
+    /** API key source: 'project', 'global', or 'env' */
+    apiKeySource: ApiKeySource | null;
 }
 export type HudPreset = 'minimal' | 'focused' | 'full' | 'opencode' | 'dense';
 /**
@@ -288,6 +291,7 @@ export interface HudElementConfig {
     permissionStatus: boolean;
     thinking: boolean;
     thinkingFormat: ThinkingFormat;
+    apiKeySource: boolean;
     promptTime: boolean;
     sessionHealth: boolean;
     showSessionDuration?: boolean;

@@ -7,7 +7,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { getClaudeConfigDir } from '../utils/paths.js';
-import { resolveToWorktreeRoot, getOmcRoot } from '../lib/worktree-paths.js';
+import { validateWorkingDirectory, getOmcRoot } from '../lib/worktree-paths.js';
+import { atomicWriteJsonSync } from '../lib/atomic-write.js';
 import { DEFAULT_HUD_CONFIG, PRESET_CONFIGS } from './types.js';
 import { cleanupStaleBackgroundTasks, markOrphanedTasksAsStale } from './background-cleanup.js';
 // ============================================================================
@@ -17,7 +18,7 @@ import { cleanupStaleBackgroundTasks, markOrphanedTasksAsStale } from './backgro
  * Get the HUD state file path in the project's .omc/state directory
  */
 function getLocalStateFilePath(directory) {
-    const baseDir = resolveToWorktreeRoot(directory);
+    const baseDir = validateWorkingDirectory(directory);
     const omcStateDir = join(getOmcRoot(baseDir), 'state');
     return join(omcStateDir, 'hud-state.json');
 }
@@ -37,7 +38,7 @@ function getConfigFilePath() {
  * Ensure the .omc/state directory exists
  */
 function ensureStateDir(directory) {
-    const baseDir = resolveToWorktreeRoot(directory);
+    const baseDir = validateWorkingDirectory(directory);
     const omcStateDir = join(getOmcRoot(baseDir), 'state');
     if (!existsSync(omcStateDir)) {
         mkdirSync(omcStateDir, { recursive: true });
@@ -62,7 +63,7 @@ export function readHudState(directory) {
         }
     }
     // Check legacy local state (.omc/hud-state.json)
-    const baseDir = resolveToWorktreeRoot(directory);
+    const baseDir = validateWorkingDirectory(directory);
     const legacyStateFile = join(getOmcRoot(baseDir), 'hud-state.json');
     if (existsSync(legacyStateFile)) {
         try {
@@ -83,7 +84,7 @@ export function writeHudState(state, directory) {
         // Write to local .omc/state only
         ensureStateDir(directory);
         const localStateFile = getLocalStateFilePath(directory);
-        writeFileSync(localStateFile, JSON.stringify(state, null, 2));
+        atomicWriteJsonSync(localStateFile, state);
         return true;
     }
     catch {

@@ -23,6 +23,7 @@ export declare const OmcPaths: {
     readonly SCIENTIST: ".omc/scientist";
     readonly AUTOPILOT: ".omc/autopilot";
     readonly SKILLS: ".omc/skills";
+    readonly SHARED_MEMORY: ".omc/state/shared-memory";
 };
 /**
  * Get the git worktree root for the current or specified directory.

@@ -41,6 +41,21 @@ export declare function buildTmuxSessionName(cwd: string, options?: {
  */
 export declare function sanitizeTmuxToken(value: string): string;
 /**
+ * Wrap a shell command to run inside a login shell, ensuring the user's
+ * shell rc files (.zshrc, .bashrc, etc.) are sourced.
+ *
+ * When tmux creates a pane with an explicit command, it uses a non-login
+ * shell ($SHELL -c 'command'), so rc files are not loaded. This wrapper
+ * replaces the outer shell with a login shell via exec, ensuring PATH
+ * and other environment from rc files are available.
+ *
+ * Note: `-lc` alone starts a login+non-interactive shell which sources
+ * .zprofile/.bash_profile but NOT .zshrc/.bashrc (those require an
+ * interactive shell). We explicitly source the rc file so that PATH
+ * and user environment are fully available.
+ */
+export declare function wrapWithLoginShell(command: string): string;
+/**
  * Build shell command string for tmux with proper quoting
  */
 export declare function buildTmuxShellCommand(command: string, args: string[]): string;

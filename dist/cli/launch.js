@@ -3,7 +3,7 @@
  * Launches Claude Code with tmux session management
  */
 import { execFileSync } from 'child_process';
-import { resolveLaunchPolicy, buildTmuxSessionName, buildTmuxShellCommand, isClaudeAvailable, } from './tmux-utils.js';
+import { resolveLaunchPolicy, buildTmuxSessionName, buildTmuxShellCommand, wrapWithLoginShell, isClaudeAvailable, } from './tmux-utils.js';
 // Flag mapping
 const MADMAX_FLAG = '--madmax';
 const YOLO_FLAG = '--yolo';
@@ -335,7 +335,9 @@ function runClaudeOutsideTmux(cwd, args, _sessionId, options) {
     // When tmux attach-session sends a DA1 query, the terminal replies with
     // \e[?6c which lands in the pty buffer before Claude reads input.
     // A short sleep lets the response arrive, then tcflush discards it.
-    const claudeCmd = `${omcExports}sleep 0.3; perl -e 'use POSIX;tcflush(0,TCIFLUSH)' 2>/dev/null; ${rawClaudeCmd}`;
+    const innerCmd = `${omcExports}sleep 0.3; perl -e 'use POSIX;tcflush(0,TCIFLUSH)' 2>/dev/null; ${rawClaudeCmd}`;
+    // Wrap in a login shell so the user's rc files (.zshrc, .bashrc) are sourced
+    const claudeCmd = wrapWithLoginShell(innerCmd);
     const sessionName = buildTmuxSessionName(cwd, { worktree: options?.worktree });
     const tmuxArgs = [
         'new-session', '-d', '-s', sessionName, '-c', cwd,

@@ -96,6 +96,30 @@ export function sanitizeTmuxToken(value) {
     return cleaned || 'unknown';
 }
 /**
+ * Wrap a shell command to run inside a login shell, ensuring the user's
+ * shell rc files (.zshrc, .bashrc, etc.) are sourced.
+ *
+ * When tmux creates a pane with an explicit command, it uses a non-login
+ * shell ($SHELL -c 'command'), so rc files are not loaded. This wrapper
+ * replaces the outer shell with a login shell via exec, ensuring PATH
+ * and other environment from rc files are available.
+ *
+ * Note: `-lc` alone starts a login+non-interactive shell which sources
+ * .zprofile/.bash_profile but NOT .zshrc/.bashrc (those require an
+ * interactive shell). We explicitly source the rc file so that PATH
+ * and user environment are fully available.
+ */
+export function wrapWithLoginShell(command) {
+    const shell = process.env.SHELL || '/bin/bash';
+    const shellName = basename(shell).replace(/\.(exe|cmd|bat)$/i, '');
+    const home = process.env.HOME || '';
+    const rcFile = home ? `${home}/.${shellName}rc` : '';
+    const sourceRc = rcFile
+        ? `[ -f ${quoteShellArg(rcFile)} ] && . ${quoteShellArg(rcFile)}; `
+        : '';
+    return `exec ${quoteShellArg(shell)} -lc ${quoteShellArg(sourceRc + command)}`;
+}
+/**
  * Build shell command string for tmux with proper quoting
  */
 export function buildTmuxShellCommand(command, args) {
@@ -162,7 +186,7 @@ export function listHudWatchPaneIdsInCurrentWindow(currentPaneId) {
  */
 export function createHudWatchPane(cwd, hudCmd) {
     try {
-        const output = execFileSync('tmux', ['split-window', '-v', '-l', '4', '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd], { encoding: 'utf-8' });
+        const output = execFileSync('tmux', ['split-window', '-v', '-l', '4', '-d', '-c', cwd, '-P', '-F', '#{pane_id}', wrapWithLoginShell(hudCmd)], { encoding: 'utf-8' });
         const paneId = output.split('\n')[0]?.trim() || '';
         return paneId.startsWith('%') ? paneId : null;
     }

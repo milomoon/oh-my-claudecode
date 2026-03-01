@@ -474,19 +474,34 @@ function teamsDir(teamName) {
   return result;
 }
 function inboxPath(teamName, workerName) {
-  return (0, import_path6.join)(teamsDir(teamName), "inbox", `${sanitizeName(workerName)}.jsonl`);
+  const base = (0, import_path6.join)(getClaudeConfigDir(), "teams");
+  const result = (0, import_path6.join)(teamsDir(teamName), "inbox", `${sanitizeName(workerName)}.jsonl`);
+  validateResolvedPath(result, base);
+  return result;
 }
 function inboxCursorPath(teamName, workerName) {
-  return (0, import_path6.join)(teamsDir(teamName), "inbox", `${sanitizeName(workerName)}.offset`);
+  const base = (0, import_path6.join)(getClaudeConfigDir(), "teams");
+  const result = (0, import_path6.join)(teamsDir(teamName), "inbox", `${sanitizeName(workerName)}.offset`);
+  validateResolvedPath(result, base);
+  return result;
 }
 function outboxPath(teamName, workerName) {
-  return (0, import_path6.join)(teamsDir(teamName), "outbox", `${sanitizeName(workerName)}.jsonl`);
+  const base = (0, import_path6.join)(getClaudeConfigDir(), "teams");
+  const result = (0, import_path6.join)(teamsDir(teamName), "outbox", `${sanitizeName(workerName)}.jsonl`);
+  validateResolvedPath(result, base);
+  return result;
 }
 function signalPath(teamName, workerName) {
-  return (0, import_path6.join)(teamsDir(teamName), "signals", `${sanitizeName(workerName)}.shutdown`);
+  const base = (0, import_path6.join)(getClaudeConfigDir(), "teams");
+  const result = (0, import_path6.join)(teamsDir(teamName), "signals", `${sanitizeName(workerName)}.shutdown`);
+  validateResolvedPath(result, base);
+  return result;
 }
 function drainSignalPath(teamName, workerName) {
-  return (0, import_path6.join)(teamsDir(teamName), "signals", `${sanitizeName(workerName)}.drain`);
+  const base = (0, import_path6.join)(getClaudeConfigDir(), "teams");
+  const result = (0, import_path6.join)(teamsDir(teamName), "signals", `${sanitizeName(workerName)}.drain`);
+  validateResolvedPath(result, base);
+  return result;
 }
 function ensureDir(filePath) {
   const dir = (0, import_path6.dirname)(filePath);

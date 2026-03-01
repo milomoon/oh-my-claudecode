@@ -6,7 +6,8 @@ import { bridgeBootstrapToOmx, pollOmxCompletion, } from '../interop/worker-adap
 import { appendOmxTeamEvent } from '../interop/omx-team-state.js';
 import { buildWorkerArgv, validateCliAvailable, getWorkerEnv as getModelWorkerEnv, isPromptModeAgent, getPromptModeArgs } from './model-contract.js';
 import { validateTeamName } from './team-name.js';
-import { createTeamSession, spawnWorkerInPane, sendToWorker, isWorkerAlive, killTeamSession, } from './tmux-session.js';
+import { createTeamSession, spawnWorkerInPane, sendToWorker, isWorkerAlive, killTeamSession, waitForPaneReady, } from './tmux-session.js';
+import { LayoutStabilizer } from './layout-stabilizer.js';
 import { composeInitialInbox, ensureWorkerStateDir, writeWorkerOverlay, } from './worker-bootstrap.js';
 import { withTaskLock } from './task-file-ops.js';
 function workerName(index) {
@@ -164,6 +165,7 @@ export async function allTasksTerminal(runtime) {
  * Includes task ID, subject, full description, and done-signal path.
  */
 function buildInitialTaskInstruction(teamName, workerName, task, taskId) {
+    const readyPath = `.omc/state/team/${teamName}/workers/${workerName}/.ready`;
     const donePath = `.omc/state/team/${teamName}/workers/${workerName}/done.json`;
     const doneDir = `.omc/state/team/${teamName}/workers/${workerName}`;
     return [
@@ -172,12 +174,19 @@ function buildInitialTaskInstruction(teamName, workerName, task, taskId) {
         `Worker: ${workerName}`,
         `Subject: ${task.subject}`,
         ``,
+        `## FIRST ACTION REQUIRED`,
+        `Before doing anything else, write your ready sentinel file:`,
+        '```bash',
+        `mkdir -p $(dirname ${readyPath}) && touch ${readyPath}`,
+        '```',
+        ``,
         task.description,
         ``,
         `When complete, write done signal using a bash command (do NOT use a file-write tool):`,
         '```bash',
         `mkdir -p ${doneDir} && echo '{"taskId":"${taskId}","status":"completed","summary":"done","completedAt":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > ${donePath}`,
         '```',
+        `For failures, set status to "failed" and include the error in summary.`,
         ``,
         `IMPORTANT: Execute ONLY the task assigned to you in this inbox. After writing done.json, exit immediately. Do not read from the task directory or claim other tasks.`,
     ].join('\n');
@@ -227,6 +236,10 @@ export async function startTeam(config) {
     // Create tmux session with ZERO worker panes (leader only).
     // Workers are spawned on-demand by the orchestrator.
     const session = await createTeamSession(teamName, 0, cwd);
+    const layoutStabilizer = new LayoutStabilizer({
+        sessionTarget: session.sessionName,
+        leaderPaneId: session.leaderPaneId,
+    });
     const runtime = {
         teamName,
         sessionName: session.sessionName,
@@ -236,6 +249,7 @@ export async function startTeam(config) {
         workerPaneIds: session.workerPaneIds, // initially empty []
         activeWorkers: new Map(),
         cwd,
+        layoutStabilizer,
     };
     const maxConcurrentWorkers = agentTypes.length;
     for (let i = 0; i < maxConcurrentWorkers; i++) {
@@ -432,6 +446,11 @@ export function watchdogCliWorkers(runtime, intervalMs) {
                     unresponsiveCounts.delete(wName);
                 }
             }
+            // Flush any pending debounced layout operations at the end of the tick
+            // to ensure layout is stable after processing all workers (#1158)
+            if (runtime.layoutStabilizer) {
+                await runtime.layoutStabilizer.flush();
+            }
             // Reset failure counter on a successful tick
             consecutiveFailures = 0;
         }
@@ -459,7 +478,11 @@ export function watchdogCliWorkers(runtime, intervalMs) {
         }
     };
     const intervalId = setInterval(() => { tick(); }, intervalMs);
-    return () => clearInterval(intervalId);
+    return () => {
+        clearInterval(intervalId);
+        // Dispose layout stabilizer on watchdog stop to cancel any pending operations (#1158)
+        runtime.layoutStabilizer?.dispose();
+    };
 }
 /**
  * Spawn a worker pane for an explicit task assignment.
@@ -505,10 +528,13 @@ export async function spawnWorkerForTask(runtime, workerNameValue, taskIndex) {
         workerName: workerNameValue,
         cwd: runtime.cwd,
     });
-    // For prompt-mode agents (e.g. Gemini Ink TUI), pass instruction via CLI
-    // flag so tmux send-keys never needs to interact with the TUI input widget.
+    // For prompt-mode agents (e.g. Gemini Ink TUI), pass the full task
+    // instruction inline via CLI flag. This bypasses gitignore restrictions
+    // (e.g. Gemini's respectGitIgnore=true ignoring .omc/ paths) by embedding
+    // the task content directly in the CLI argument instead of referencing an
+    // inbox file that may be invisible to the worker. See #1148.
     if (usePromptMode) {
-        const promptArgs = getPromptModeArgs(agentType, `Read and execute your task from: ${relInboxPath}`);
+        const promptArgs = getPromptModeArgs(agentType, instruction);
         launchArgs.push(...promptArgs);
     }
     const paneConfig = {
@@ -519,14 +545,25 @@ export async function spawnWorkerForTask(runtime, workerNameValue, taskIndex) {
         launchArgs,
         cwd: runtime.cwd,
     };
-    await spawnWorkerInPane(runtime.sessionName, paneId, paneConfig);
+    // For promptMode agents, wait for the shell to be ready before sending keys
+    // to avoid the race condition where send-keys fires before zsh is ready (#1144).
+    // Non-promptMode agents already have a 4s post-spawn delay, so skip the wait.
+    await spawnWorkerInPane(runtime.sessionName, paneId, paneConfig, {
+        waitForShell: usePromptMode,
+    });
     runtime.workerPaneIds.push(paneId);
     runtime.activeWorkers.set(workerNameValue, { paneId, taskId, spawnedAt: Date.now() });
-    try {
-        await execFileAsync('tmux', ['select-layout', '-t', runtime.sessionName, 'main-vertical']);
+    // Debounced layout recalculation — prevents thrashing during rapid spawn cycles (#1158)
+    if (runtime.layoutStabilizer) {
+        runtime.layoutStabilizer.requestLayout();
     }
-    catch {
-        // layout update is best-effort
+    else {
+        try {
+            await execFileAsync('tmux', ['select-layout', '-t', runtime.sessionName, 'main-vertical']);
+        }
+        catch {
+            // layout update is best-effort
+        }
     }
     try {
         await writePanesTrackingFileIfPresent(runtime);
@@ -535,9 +572,15 @@ export async function spawnWorkerForTask(runtime, workerNameValue, taskIndex) {
         // panes tracking is best-effort
     }
     if (!usePromptMode) {
-        // Interactive mode: wait for CLI startup, handle trust-confirm, then
-        // send instruction via tmux send-keys.
-        await new Promise(r => setTimeout(r, 4000));
+        // Interactive mode: poll for CLI readiness instead of blind wait.
+        // waitForPaneReady polls paneLooksReady() to confirm the pane has a
+        // visible prompt, closing the TOCTOU gap between readiness and delivery.
+        const paneReady = await waitForPaneReady(paneId, { timeoutMs: 8000, pollIntervalMs: 500 });
+        if (!paneReady) {
+            await killWorkerPane(runtime, workerNameValue, paneId);
+            await resetTaskToPending(root, taskId);
+            throw new Error(`worker_pane_not_ready:${workerNameValue}`);
+        }
         if (agentType === 'gemini') {
             const confirmed = await notifyPaneWithRetry(runtime.sessionName, paneId, '1');
             if (!confirmed) {
@@ -560,7 +603,29 @@ export async function spawnWorkerForTask(runtime, workerNameValue, taskIndex) {
     if (isOmxInteropWorker(runtime, workerNameValue)) {
         const ctx = buildAdapterContext(runtime);
         if (ctx) {
-            await bridgeBootstrapToOmx(ctx, workerNameValue, { id: taskId, subject: task.subject, description: task.description });
+            try {
+                await bridgeBootstrapToOmx(ctx, workerNameValue, { id: taskId, subject: task.subject, description: task.description });
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                // Visible warning: fail-open means the worker proceeds without interop,
+                // which may cause subtle issues.  Log prominently AND persist to disk
+                // so the failure is discoverable after the fact (issue #1164).
+                process.stderr.write(`[WARN][spawnWorkerForTask] interop bootstrap failed (fail-open) for ${workerNameValue} task ${taskId}: ${message}. Worker will proceed without interop.\n`);
+                const failureMeta = {
+                    workerName: workerNameValue,
+                    taskId,
+                    error: message,
+                    failedAt: new Date().toISOString(),
+                    failOpen: true,
+                };
+                try {
+                    await writeJson(join(stateRoot(runtime.cwd, runtime.teamName), 'workers', workerNameValue, 'interop-bootstrap-failed.json'), failureMeta);
+                }
+                catch {
+                    // best-effort: persist failure is non-fatal
+                }
+            }
         }
     }
     return paneId;
@@ -583,6 +648,8 @@ export async function killWorkerPane(runtime, workerNameValue, paneId) {
         runtime.workerPaneIds.splice(paneIndex, 1);
     }
     runtime.activeWorkers.delete(workerNameValue);
+    // Debounced layout recalculation after pane removal (#1158)
+    runtime.layoutStabilizer?.requestLayout();
     try {
         await writePanesTrackingFileIfPresent(runtime);
     }

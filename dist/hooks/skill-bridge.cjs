@@ -56,7 +56,8 @@ var OmcPaths = {
   LOGS: ".omc/logs",
   SCIENTIST: ".omc/scientist",
   AUTOPILOT: ".omc/autopilot",
-  SKILLS: ".omc/skills"
+  SKILLS: ".omc/skills",
+  SHARED_MEMORY: ".omc/state/shared-memory"
 };
 
 // src/hooks/learner/bridge.ts

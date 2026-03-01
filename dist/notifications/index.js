@@ -9,12 +9,14 @@
  *   import { notify } from '../notifications/index.js';
  *   await notify('session-start', { sessionId, projectPath, ... });
  */
-export { dispatchNotifications, sendDiscord, sendDiscordBot, sendTelegram, sendSlack, sendWebhook, } from "./dispatcher.js";
+export { dispatchNotifications, sendDiscord, sendDiscordBot, sendTelegram, sendSlack, sendSlackBot, sendWebhook, } from "./dispatcher.js";
 export { formatNotification, formatSessionStart, formatSessionStop, formatSessionEnd, formatSessionIdle, formatAskUserQuestion, formatAgentCall, } from "./formatter.js";
 export { getCurrentTmuxSession, getCurrentTmuxPaneId, getTeamTmuxSessions, formatTmuxInfo, } from "./tmux.js";
 export { getNotificationConfig, isEventEnabled, getEnabledPlatforms, getVerbosity, isEventAllowedByVerbosity, shouldIncludeTmuxTail, } from "./config.js";
 export { getHookConfig, resolveEventTemplate, resetHookConfigCache, mergeHookConfigIntoNotificationConfig, } from "./hook-config.js";
 export { interpolateTemplate, getDefaultTemplate, validateTemplate, computeTemplateVariables, } from "./template-engine.js";
+export { verifySlackSignature, isTimestampValid, validateSlackEnvelope, validateSlackMessage, SlackConnectionStateTracker, } from "./slack-socket.js";
+export { redactTokens } from "./redact.js";
 import { getNotificationConfig, isEventEnabled, getVerbosity, isEventAllowedByVerbosity, shouldIncludeTmuxTail, } from "./config.js";
 import { formatNotification } from "./formatter.js";
 import { dispatchNotifications } from "./dispatcher.js";
@@ -101,7 +103,7 @@ export async function notify(event, data) {
             const hookConfig = getHookConfig();
             if (hookConfig?.enabled) {
                 const platforms = [
-                    "discord", "discord-bot", "telegram", "slack", "webhook",
+                    "discord", "discord-bot", "telegram", "slack", "slack-bot", "webhook",
                 ];
                 const map = new Map();
                 for (const platform of platforms) {
@@ -127,7 +129,7 @@ export async function notify(event, data) {
                 for (const r of result.results) {
                     if (r.success &&
                         r.messageId &&
-                        (r.platform === "discord-bot" || r.platform === "telegram")) {
+                        (r.platform === "discord-bot" || r.platform === "telegram" || r.platform === "slack-bot")) {
                         registerMessage({
                             platform: r.platform,
                             messageId: r.messageId,

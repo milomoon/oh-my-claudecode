@@ -2,7 +2,8 @@
  * Reply Listener Daemon
  *
  * Background daemon that polls Discord and Telegram for replies to notification messages,
- * sanitizes input, verifies the target pane, and injects reply text via sendToPane().
+ * listens for Slack messages via Socket Mode, sanitizes input, verifies the target pane,
+ * and injects reply text via sendToPane().
  *
  * Security considerations:
  * - State/PID/log files use restrictive permissions (0600)
@@ -15,6 +16,7 @@
  * Follows the daemon pattern from src/features/rate-limit-wait/daemon.ts
  */
 import type { ReplyConfig } from './types.js';
+import { SlackConnectionStateTracker, type SlackValidationResult } from './slack-socket.js';
 /** Reply listener daemon state */
 export interface ReplyListenerState {
     isRunning: boolean;
@@ -35,6 +37,14 @@ export interface ReplyListenerDaemonConfig extends ReplyConfig {
     discordChannelId?: string;
     /** Discord mention tag to include in injection feedback (e.g. "<@123456>") */
     discordMention?: string;
+    /** Slack app-level token for Socket Mode (xapp-...) */
+    slackAppToken?: string;
+    /** Slack bot token for Web API (xoxb-...) */
+    slackBotToken?: string;
+    /** Slack channel ID to listen in */
+    slackChannelId?: string;
+    /** Slack signing secret for verifying incoming WebSocket messages */
+    slackSigningSecret?: string;
 }
 /** Response from daemon operations */
 export interface DaemonResponse {
@@ -64,6 +74,14 @@ export declare function isDaemonRunning(): boolean;
  * - Control characters stripped
  */
 export declare function sanitizeReplyInput(text: string): string;
+declare class RateLimiter {
+    private readonly maxPerMinute;
+    private timestamps;
+    private readonly windowMs;
+    constructor(maxPerMinute: number);
+    canProceed(): boolean;
+    reset(): void;
+}
 /**
  * Main daemon polling loop
  */
@@ -87,5 +105,34 @@ export declare function stopReplyListener(): DaemonResponse;
  * Get daemon status
  */
 export declare function getReplyListenerStatus(): DaemonResponse;
+/**
+ * Validate and process an incoming Slack WebSocket message before session injection.
+ *
+ * This function is the security gate for Slack Socket Mode messages.
+ * All Slack messages MUST pass through this function before reaching injectReply().
+ *
+ * Validation steps:
+ * 1. Slack message validation (envelope, signing secret, connection state)
+ * 2. Rate limiting
+ * 3. Session registry lookup
+ * 4. Pane verification and injection
+ *
+ * @param rawMessage - Raw WebSocket message string
+ * @param connectionState - Slack connection state tracker
+ * @param paneId - Target tmux pane ID (from session registry lookup by caller)
+ * @param config - Daemon configuration
+ * @param state - Daemon state (mutated: errors/messagesInjected counters)
+ * @param rateLimiter - Rate limiter instance
+ * @param signature - Slack request signature header (x-slack-signature)
+ * @param timestamp - Slack request timestamp header (x-slack-request-timestamp)
+ * @returns Object with injection result and validation details
+ */
+export declare function processSlackSocketMessage(rawMessage: string, connectionState: SlackConnectionStateTracker, paneId: string | null, config: ReplyListenerDaemonConfig, state: ReplyListenerState, rateLimiter: RateLimiter, signature?: string, timestamp?: string): {
+    injected: boolean;
+    validation: SlackValidationResult;
+};
+export { SlackConnectionStateTracker } from './slack-socket.js';
+export type { SlackValidationResult } from './slack-socket.js';
+export { RateLimiter };
 export { pollLoop };
 //# sourceMappingURL=reply-listener.d.ts.map
