@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
@@ -29,6 +30,17 @@ jobs:
 
       - name: Run tests
         run: npm test -- --run
+
+      - name: Publish to npm
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view oh-my-claude-sisyphus@$VERSION version 2>/dev/null; then
+            echo "::warning::Version $VERSION already published to npm, skipping publish"
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

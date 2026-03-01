@@ -8,7 +8,6 @@
 import { z } from 'zod';
 import { existsSync, readFileSync, unlinkSync } from 'fs';
 import {
-  getWorktreeRoot,
   resolveStatePath,
   ensureOmcDir,
   validateWorkingDirectory,
@@ -16,9 +15,9 @@ import {
   ensureSessionStateDir,
   listSessionIds,
   validateSessionId,
-  getSessionStateDir,
 } from '../lib/worktree-paths.js';
 import { atomicWriteJsonSync } from '../lib/atomic-write.js';
+import { validatePayload } from '../lib/payload-limits.js';
 import {
   isModeActive,
   getActiveModes,
@@ -26,21 +25,20 @@ import {
   clearModeState,
   getStateFilePath,
   MODE_CONFIGS,
-  isModeActiveInAnySession,
   getActiveSessionsForMode,
   type ExecutionMode
 } from '../hooks/mode-registry/index.js';
 import { ToolDefinition } from './types.js';
 
-// ExecutionMode from mode-registry (9 modes - NO ralplan)
+// ExecutionMode from mode-registry (5 modes - NO ralplan)
 const EXECUTION_MODES: [string, ...string[]] = [
-  'autopilot', 'ultrapilot', 'swarm', 'pipeline', 'team',
-  'ralph', 'ultrawork', 'ultraqa', 'ecomode'
+  'autopilot', 'team', 'ralph', 'ultrawork', 'ultraqa'
 ];
 
 // Extended type for state tools - includes ralplan which has state but isn't in mode-registry
-const STATE_TOOL_MODES: [string, ...string[]] = [...EXECUTION_MODES, 'ralplan'];
+const STATE_TOOL_MODES: [string, ...string[]] = [...EXECUTION_MODES, 'ralplan', 'omc-teams'];
 type StateToolMode = typeof STATE_TOOL_MODES[number];
+const CANCEL_SIGNAL_TTL_MS = 30_000;
 
 /**
  * Get the state file path for any mode (including swarm and ralplan).
@@ -80,25 +78,6 @@ export const stateReadTool: ToolDefinition<{
     try {
       const root = validateWorkingDirectory(workingDirectory);
       const sessionId = session_id as string | undefined;
-
-      // Special handling for swarm (SQLite database - no session support)
-      if (mode === 'swarm') {
-        const statePath = getStatePath(mode, root);
-        if (!existsSync(statePath)) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `No state found for mode: swarm\nNote: Swarm uses SQLite (swarm.db), not JSON. Expected path: ${statePath}`
-            }]
-          };
-        }
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `## State for swarm\n\nPath: ${statePath}\n\nNote: Swarm uses SQLite database. Use swarm-specific tools to query state.`
-          }]
-        };
-      }
 
       // If session_id provided, read from session-scoped path
       if (sessionId) {
@@ -227,12 +206,12 @@ export const stateWriteTool: ToolDefinition<{
     active: z.boolean().optional().describe('Whether the mode is currently active'),
     iteration: z.number().optional().describe('Current iteration number'),
     max_iterations: z.number().optional().describe('Maximum iterations allowed'),
-    current_phase: z.string().optional().describe('Current execution phase'),
-    task_description: z.string().optional().describe('Description of the task being executed'),
-    plan_path: z.string().optional().describe('Path to the plan file'),
-    started_at: z.string().optional().describe('ISO timestamp when the mode started'),
-    completed_at: z.string().optional().describe('ISO timestamp when the mode completed'),
-    error: z.string().optional().describe('Error message if the mode failed'),
+    current_phase: z.string().max(200).optional().describe('Current execution phase'),
+    task_description: z.string().max(2000).optional().describe('Description of the task being executed'),
+    plan_path: z.string().max(500).optional().describe('Path to the plan file'),
+    started_at: z.string().max(100).optional().describe('ISO timestamp when the mode started'),
+    completed_at: z.string().max(100).optional().describe('ISO timestamp when the mode completed'),
+    error: z.string().max(2000).optional().describe('Error message if the mode failed'),
     state: z.record(z.string(), z.unknown()).optional().describe('Additional custom state fields (merged with explicit parameters)'),
     workingDirectory: z.string().optional().describe('Working directory (defaults to cwd)'),
     session_id: z.string().optional().describe('Session ID for session-scoped state isolation. When provided, the tool operates only within that session. When omitted, the tool aggregates legacy state plus all session-scoped state (may include other sessions).'),
@@ -258,15 +237,18 @@ export const stateWriteTool: ToolDefinition<{
       const root = validateWorkingDirectory(workingDirectory);
       const sessionId = session_id as string | undefined;
 
-      // Swarm uses SQLite - cannot be written via this tool
-      if (mode === 'swarm') {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Error: Swarm uses SQLite database (swarm.db), not JSON. Use swarm-specific APIs to modify state.`
-          }],
-          isError: true
-        };
+      // Validate custom state payload size if provided
+      if (state) {
+        const validation = validatePayload(state);
+        if (!validation.valid) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Error: state payload rejected — ${validation.error}`
+            }],
+            isError: true
+          };
+        }
       }
 
       // Determine state path based on session_id
@@ -364,22 +346,50 @@ export const stateClearTool: ToolDefinition<{
       // If session_id provided, clear only session-specific state
       if (sessionId) {
         validateSessionId(sessionId);
+        const now = Date.now();
+        const cancelSignalPath = resolveSessionStatePath('cancel-signal', sessionId, root);
+        atomicWriteJsonSync(cancelSignalPath, {
+          active: true,
+          requested_at: new Date(now).toISOString(),
+          expires_at: new Date(now + CANCEL_SIGNAL_TTL_MS).toISOString(),
+          mode,
+          source: 'state_clear'
+        });
 
         if (MODE_CONFIGS[mode as ExecutionMode]) {
           const success = clearModeState(mode as ExecutionMode, root, sessionId);
 
+          // Ghost-legacy cleanup: after clearing session file, also remove
+          // any legacy file at .omc/state/{mode}-state.json if it belongs
+          // to this session (matching _meta.sessionId) or has no _meta block.
+          let ghostCleaned = false;
+          try {
+            const legacyPath = getStateFilePath(root, mode as ExecutionMode);
+            if (existsSync(legacyPath)) {
+              const raw = JSON.parse(readFileSync(legacyPath, 'utf-8')) as Record<string, unknown>;
+              const meta = raw._meta as Record<string, unknown> | undefined;
+              if (!meta || meta.sessionId === sessionId) {
+                unlinkSync(legacyPath);
+                ghostCleaned = true;
+              }
+            }
+          } catch {
+            // Best-effort ghost cleanup — ignore errors
+          }
+
+          const ghostNote = ghostCleaned ? ' (ghost legacy file also removed)' : '';
           if (success) {
             return {
               content: [{
                 type: 'text' as const,
-                text: `Successfully cleared state for mode: ${mode} in session: ${sessionId}`
+                text: `Successfully cleared state for mode: ${mode} in session: ${sessionId}${ghostNote}`
               }]
             };
           } else {
             return {
               content: [{
                 type: 'text' as const,
-                text: `Warning: Some files could not be removed for mode: ${mode} in session: ${sessionId}`
+                text: `Warning: Some files could not be removed for mode: ${mode} in session: ${sessionId}${ghostNote}`
               }]
             };
           }
@@ -389,20 +399,31 @@ export const stateClearTool: ToolDefinition<{
         const statePath = resolveSessionStatePath(mode, sessionId, root);
         if (existsSync(statePath)) {
           unlinkSync(statePath);
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `Successfully cleared state for mode: ${mode} in session: ${sessionId}\nRemoved: ${statePath}`
-            }]
-          };
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `No state found to clear for mode: ${mode} in session: ${sessionId}`
-            }]
-          };
         }
+
+        // Ghost-legacy cleanup for non-registry modes
+        let ghostCleaned = false;
+        try {
+          const legacyPath = resolveStatePath(mode, root);
+          if (existsSync(legacyPath)) {
+            const raw = JSON.parse(readFileSync(legacyPath, 'utf-8')) as Record<string, unknown>;
+            const meta = raw._meta as Record<string, unknown> | undefined;
+            if (!meta || meta.sessionId === sessionId) {
+              unlinkSync(legacyPath);
+              ghostCleaned = true;
+            }
+          }
+        } catch {
+          // Best-effort ghost cleanup
+        }
+
+        const ghostNote = ghostCleaned ? ' (ghost legacy file also removed)' : '';
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Successfully cleared state for mode: ${mode} in session: ${sessionId}${ghostNote}`
+          }]
+        };
       }
 
       // No session_id: clear from all locations (legacy + all sessions)
@@ -533,6 +554,20 @@ export const stateListActiveTool: ToolDefinition<{
           // Ignore parse errors
         }
 
+        // Also check omc-teams for this session
+        try {
+          const omcTeamsPath = resolveSessionStatePath('omc-teams', sessionId, root);
+          if (existsSync(omcTeamsPath)) {
+            const content = readFileSync(omcTeamsPath, 'utf-8');
+            const state = JSON.parse(content);
+            if (state.active) {
+              activeModes.push('omc-teams');
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        }
+
         if (activeModes.length === 0) {
           return {
             content: [{
@@ -569,6 +604,18 @@ export const stateListActiveTool: ToolDefinition<{
           // Ignore parse errors
         }
       }
+      const omcTeamsLegacyPath = getStatePath('omc-teams', root);
+      if (existsSync(omcTeamsLegacyPath)) {
+        try {
+          const content = readFileSync(omcTeamsLegacyPath, 'utf-8');
+          const state = JSON.parse(content);
+          if (state.active) {
+            legacyActiveModes.push('omc-teams');
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
 
       for (const mode of legacyActiveModes) {
         if (!modeSessionMap.has(mode)) {
@@ -590,6 +637,20 @@ export const stateListActiveTool: ToolDefinition<{
             const state = JSON.parse(content);
             if (state.active) {
               sessionActiveModes.push('ralplan');
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        }
+
+        // Also check omc-teams for this session
+        try {
+          const omcTeamsSessionPath = resolveSessionStatePath('omc-teams', sid, root);
+          if (existsSync(omcTeamsSessionPath)) {
+            const content = readFileSync(omcTeamsSessionPath, 'utf-8');
+            const state = JSON.parse(content);
+            if (state.active) {
+              sessionActiveModes.push('omc-teams');
             }
           }
         } catch {
@@ -794,6 +855,22 @@ export const stateGetStatusTool: ToolDefinition<{
       const ralplanIcon = ralplanActive ? '[ACTIVE]' : '[INACTIVE]';
       lines.push(`${ralplanIcon} **ralplan**: ${ralplanActive ? 'Active' : 'Inactive'}`);
       lines.push(`   Path: \`${ralplanPath}\``);
+
+      // Also check omc-teams (not in MODE_CONFIGS)
+      const omcTeamsPath = sessionId
+        ? resolveSessionStatePath('omc-teams', sessionId, root)
+        : getStatePath('omc-teams', root);
+      let omcTeamsActive = false;
+      if (existsSync(omcTeamsPath)) {
+        try {
+          const content = readFileSync(omcTeamsPath, 'utf-8');
+          const state = JSON.parse(content);
+          omcTeamsActive = state.active === true;
+        } catch { }
+      }
+      const omcTeamsIcon = omcTeamsActive ? '[ACTIVE]' : '[INACTIVE]';
+      lines.push(`${omcTeamsIcon} **omc-teams**: ${omcTeamsActive ? 'Active' : 'Inactive'}`);
+      lines.push(`   Path: \`${omcTeamsPath}\``);
 
       return {
         content: [{

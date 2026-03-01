@@ -5,6 +5,8 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { MEMORY_FILE, MEMORY_DIR, CACHE_EXPIRY_MS } from './constants.js';
+import { atomicWriteJson } from '../../lib/atomic-write.js';
+import { lockPathFor, withFileLock } from '../../lib/file-lock.js';
 /**
  * Get the path to the project memory file
  */
@@ -26,7 +28,7 @@ export async function loadProjectMemory(projectRoot) {
         }
         return memory;
     }
-    catch (error) {
+    catch (_error) {
         // File doesn't exist or invalid JSON
         return null;
     }
@@ -41,13 +43,27 @@ export async function saveProjectMemory(projectRoot, memory) {
     try {
         // Ensure .omc directory exists
         await fs.mkdir(omcDir, { recursive: true });
-        // Write memory file with pretty formatting
-        await fs.writeFile(memoryPath, JSON.stringify(memory, null, 2), 'utf-8');
+        // Write memory file atomically to prevent corruption on crash
+        await atomicWriteJson(memoryPath, memory);
     }
     catch (error) {
         // Silently fail - we don't want to break the session
         console.error('Failed to save project memory:', error);
     }
+}
+/** Default lock options for project memory operations */
+const MEMORY_LOCK_OPTS = { timeoutMs: 5000 };
+/**
+ * Execute an async function while holding an exclusive lock on the project memory file.
+ * Prevents concurrent read-modify-write races across processes.
+ *
+ * @param projectRoot Project root directory
+ * @param fn Function to execute under lock
+ * @returns The function's return value
+ */
+export async function withProjectMemoryLock(projectRoot, fn) {
+    const memoryPath = getMemoryPath(projectRoot);
+    return withFileLock(lockPathFor(memoryPath), fn, MEMORY_LOCK_OPTS);
 }
 /**
  * Check if the memory cache is stale and should be rescanned
@@ -65,7 +81,7 @@ export async function deleteProjectMemory(projectRoot) {
     try {
         await fs.unlink(memoryPath);
     }
-    catch (error) {
+    catch (_error) {
         // Ignore if file doesn't exist
     }
 }

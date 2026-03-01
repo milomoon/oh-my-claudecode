@@ -34,13 +34,13 @@ function findFiles(directory, extensions, ignoreDirs = []) {
                         }
                     }
                 }
-                catch (error) {
+                catch (_error) {
                     // Skip files/dirs we can't access
                     continue;
                 }
             }
         }
-        catch (error) {
+        catch (_error) {
             // Skip directories we can't read
             return;
         }
@@ -64,8 +64,10 @@ export async function runLspAggregatedDiagnostics(directory, extensions = ['.ts'
             await lspClientManager.runWithClientLease(file, async (client) => {
                 // Open document to trigger diagnostics
                 await client.openDocument(file);
-                // Wait for diagnostics to be published
-                await new Promise(resolve => setTimeout(resolve, LSP_DIAGNOSTICS_WAIT_MS));
+                // Wait for the server to publish diagnostics via textDocument/publishDiagnostics
+                // notification instead of using a fixed delay. Falls back to LSP_DIAGNOSTICS_WAIT_MS
+                // as a timeout so we don't hang forever on servers that omit the notification.
+                await client.waitForDiagnostics(file, LSP_DIAGNOSTICS_WAIT_MS);
                 // Get diagnostics for this file
                 const diagnostics = client.getDiagnostics(file);
                 // Add to aggregated results
@@ -78,7 +80,7 @@ export async function runLspAggregatedDiagnostics(directory, extensions = ['.ts'
                 filesChecked++;
             });
         }
-        catch (error) {
+        catch (_error) {
             // Skip files that fail (including "no server available")
             continue;
         }

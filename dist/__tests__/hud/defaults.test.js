@@ -19,18 +19,32 @@ describe('HUD Default Configuration', () => {
         });
     });
     describe('PRESET_CONFIGS', () => {
-        const presets = ['minimal', 'analytics', 'focused', 'full', 'opencode', 'dense'];
-        presets.forEach(preset => {
-            it(`${preset} preset should use text thinkingFormat`, () => {
+        const presets = ['minimal', 'focused', 'full', 'opencode', 'dense'];
+        it('should use text thinkingFormat in all presets', () => {
+            presets.forEach(preset => {
                 expect(PRESET_CONFIGS[preset].thinkingFormat).toBe('text');
             });
-            it(`${preset} preset should have gitRepo disabled`, () => {
-                expect(PRESET_CONFIGS[preset].gitRepo).toBe(false);
-            });
-            it(`${preset} preset should have gitBranch disabled`, () => {
-                expect(PRESET_CONFIGS[preset].gitBranch).toBe(false);
-            });
-            it(`${preset} preset should have model disabled`, () => {
+        });
+        it('should have gitRepo enabled in full and dense presets', () => {
+            expect(PRESET_CONFIGS.full.gitRepo).toBe(true);
+            expect(PRESET_CONFIGS.dense.gitRepo).toBe(true);
+        });
+        it('should have gitRepo disabled in minimal, focused, and opencode presets', () => {
+            expect(PRESET_CONFIGS.minimal.gitRepo).toBe(false);
+            expect(PRESET_CONFIGS.focused.gitRepo).toBe(false);
+            expect(PRESET_CONFIGS.opencode.gitRepo).toBe(false);
+        });
+        it('should have gitBranch enabled in focused, full, opencode, and dense presets', () => {
+            expect(PRESET_CONFIGS.focused.gitBranch).toBe(true);
+            expect(PRESET_CONFIGS.full.gitBranch).toBe(true);
+            expect(PRESET_CONFIGS.opencode.gitBranch).toBe(true);
+            expect(PRESET_CONFIGS.dense.gitBranch).toBe(true);
+        });
+        it('should have gitBranch disabled in minimal preset', () => {
+            expect(PRESET_CONFIGS.minimal.gitBranch).toBe(false);
+        });
+        it('should have model disabled in all presets', () => {
+            presets.forEach(preset => {
                 expect(PRESET_CONFIGS[preset].model).toBe(false);
             });
         });

@@ -1,23 +1,29 @@
 ---
 name: team
 description: N coordinated agents on shared task list using Claude Code native teams
+aliases: [swarm]
 ---
 
 # Team Skill
 
 Spawn N coordinated agents working on a shared task list using Claude Code's native team tools. Replaces the legacy `/swarm` skill (SQLite-based) with built-in team management, inter-agent messaging, and task dependencies -- no external dependencies required.
 
+`swarm` is the compatibility alias for this canonical skill entrypoint.
+
 ## Usage
 
 ```
 /oh-my-claudecode:team N:agent-type "task description"
+/oh-my-claudecode:team "task description"
+/oh-my-claudecode:team ralph "task description"
 ```
 
 ### Parameters
 
-- **N** - Number of teammate agents (1-5, enforced by Claude Code limit)
-- **agent-type** - OMC agent to spawn (e.g., executor, executor-low, build-fixer, designer)
+- **N** - Number of teammate agents (1-20). Optional; defaults to auto-sizing based on task decomposition.
+- **agent-type** - OMC agent to spawn for the `team-exec` stage (e.g., executor, build-fixer, designer, codex, gemini). Optional; defaults to stage-aware routing. Use `codex` to spawn Codex CLI workers or `gemini` for Gemini CLI workers (requires respective CLIs installed). See Stage Agent Routing below.
 - **task** - High-level task to decompose and distribute among teammates
+- **ralph** - Optional modifier. When present, wraps the team pipeline in Ralph's persistence loop (retry on failure, architect verification before completion). See Team + Ralph Composition below.
 
 ### Examples
 
@@ -25,7 +31,13 @@ Spawn N coordinated agents working on a shared task list using Claude Code's nat
 /team 5:executor "fix all TypeScript errors across the project"
 /team 3:build-fixer "fix build errors in src/"
 /team 4:designer "implement responsive layouts for all page components"
-/team 2:executor-low "add JSDoc comments to all exported functions in lib/"
+/team "refactor the auth module with security review"
+/team ralph "build a complete REST API for user management"
+# With Codex CLI workers (requires: npm install -g @openai/codex)
+/team 2:codex "review architecture and suggest improvements"
+# With Gemini CLI workers (requires: npm install -g @google/gemini-cli)
+/team 2:gemini "redesign the UI components"
+# Mixed: Codex for backend analysis, Gemini for frontend (use /ccg instead for this)
 ```
 
 ## Architecture
@@ -82,23 +94,47 @@ Team execution follows a staged pipeline:
 
 `team-plan -> team-prd -> team-exec -> team-verify -> team-fix (loop)`
 
+### Stage Agent Routing
+
+Each pipeline stage uses **specialized agents** -- not just executors. The lead selects agents based on the stage and task characteristics.
+
+| Stage | Required Agents | Optional Agents | Selection Criteria |
+|-------|----------------|-----------------|-------------------|
+| **team-plan** | `explore` (haiku), `planner` (opus) | `analyst` (opus), `architect` (opus) | Use `analyst` for unclear requirements. Use `architect` for systems with complex boundaries. |
+| **team-prd** | `analyst` (opus) | `critic` (opus) | Use `critic` to challenge scope. |
+| **team-exec** | `executor` (sonnet) | `deep-executor` (opus), `build-fixer` (sonnet), `designer` (sonnet), `writer` (haiku), `test-engineer` (sonnet) | Match agent to subtask type. Use `deep-executor` for complex autonomous work, `designer` for UI, `build-fixer` for compilation issues, `writer` for docs, `test-engineer` for test creation. |
+| **team-verify** | `verifier` (sonnet) | `test-engineer` (sonnet), `security-reviewer` (sonnet), `code-reviewer` (opus), `quality-reviewer` (sonnet) | Always run `verifier`. Add `security-reviewer` for auth/crypto changes. Add `code-reviewer` for >20 files or architectural changes. Add `quality-reviewer` (model=haiku) for style/formatting checks. |
+| **team-fix** | `executor` (sonnet) | `build-fixer` (sonnet), `debugger` (sonnet), `deep-executor` (opus) | Use `build-fixer` for type/build errors. Use `debugger` for regression isolation. Use `deep-executor` for complex multi-file fixes. |
+
+**Routing rules:**
+
+1. **The lead picks agents per stage, not the user.** The user's `N:agent-type` parameter only overrides the `team-exec` stage worker type. All other stages use stage-appropriate specialists.
+2. **Specialist agents complement executor agents.** Route analysis/review to architect/critic Claude agents and UI work to designer agents. Tmux CLI workers are one-shot and don't participate in team communication.
+3. **Cost mode affects model tier.** In downgrade: `opus` agents to `sonnet`, `sonnet` to `haiku` where quality permits. `team-verify` always uses at least `sonnet`.
+4. **Risk level escalates review.** Security-sensitive or >20 file changes must include `security-reviewer` + `code-reviewer` (opus) in `team-verify`.
+
 ### Stage Entry/Exit Criteria
 
 - **team-plan**
   - Entry: Team invocation is parsed and orchestration starts.
+  - Agents: `explore` scans codebase, `planner` creates task graph, optionally `analyst`/`architect` for complex tasks.
   - Exit: decomposition is complete and a runnable task graph is prepared.
 - **team-prd**
   - Entry: scope is ambiguous or acceptance criteria are missing.
+  - Agents: `analyst` extracts requirements, optionally `critic`.
   - Exit: acceptance criteria and boundaries are explicit.
 - **team-exec**
   - Entry: `TeamCreate`, `TaskCreate`, assignment, and worker spawn are complete.
+  - Agents: workers spawned as the appropriate specialist type per subtask (see routing table).
   - Exit: execution tasks reach terminal state for the current pass.
 - **team-verify**
   - Entry: execution pass finishes.
+  - Agents: `verifier` + task-appropriate reviewers (see routing table).
   - Exit (pass): verification gates pass with no required follow-up.
   - Exit (fail): fix tasks are generated and control moves to `team-fix`.
 - **team-fix**
   - Entry: verification found defects/regressions/incomplete criteria.
+  - Agents: `executor`/`build-fixer`/`debugger` depending on defect type.
   - Exit: fixes are complete and flow returns to `team-exec` then `team-verify`.
 
 ### Verify/Fix Loop and Stop Conditions
@@ -109,17 +145,54 @@ Continue `team-exec -> team-verify -> team-fix` until:
 
 `team-fix` is bounded by max attempts. If fix attempts exceed the configured limit, transition to terminal `failed` (no infinite loop).
 
+### Stage Handoff Convention
+
+When transitioning between stages, important context — decisions made, alternatives rejected, risks identified — lives only in the lead's conversation history. If the lead's context compacts or agents restart, this knowledge is lost.
+
+**Each completing stage MUST produce a handoff document before transitioning.**
+
+The lead writes handoffs to `.omc/handoffs/<stage-name>.md`.
+
+#### Handoff Format
+
+```markdown
+## Handoff: <current-stage> → <next-stage>
+- **Decided**: [key decisions made in this stage]
+- **Rejected**: [alternatives considered and why they were rejected]
+- **Risks**: [identified risks for the next stage]
+- **Files**: [key files created or modified]
+- **Remaining**: [items left for the next stage to handle]
+```
+
+#### Handoff Rules
+
+1. **Lead reads previous handoff BEFORE spawning next stage's agents.** The handoff content is included in the next stage's agent spawn prompts, ensuring agents start with full context.
+2. **Handoffs accumulate.** The verify stage can read all prior handoffs (plan → prd → exec) for full decision history.
+3. **On team cancellation, handoffs survive** in `.omc/handoffs/` for session resume. They are not deleted by `TeamDelete`.
+4. **Handoffs are lightweight.** 10-20 lines max. They capture decisions and rationale, not full specifications (those live in deliverable files like DESIGN.md).
+
+#### Example
+
+```markdown
+## Handoff: team-plan → team-exec
+- **Decided**: Microservice architecture with 3 services (auth, api, worker). PostgreSQL for persistence. JWT for auth tokens.
+- **Rejected**: Monolith (scaling concerns), MongoDB (team expertise is SQL), session cookies (API-first design).
+- **Risks**: Worker service needs Redis for job queue — not yet provisioned. Auth service has no rate limiting in initial design.
+- **Files**: DESIGN.md, TEST_STRATEGY.md
+- **Remaining**: Database migration scripts, CI/CD pipeline config, Redis provisioning.
+```
+
 ### Resume and Cancel Semantics
 
-- **Resume:** restart from the last non-terminal stage using staged state + live task status.
-- **Cancel:** `/oh-my-claudecode:cancel` requests teammate shutdown, waits for responses (best effort), marks phase `cancelled` with `active=false`, captures cancellation metadata, then deletes team resources and clears/preserves Team state per policy.
+- **Resume:** restart from the last non-terminal stage using staged state + live task status. Read `.omc/handoffs/` to recover stage transition context.
+- **Cancel:** `/oh-my-claudecode:cancel` requests teammate shutdown, waits for responses (best effort), marks phase `cancelled` with `active=false`, captures cancellation metadata, then deletes team resources and clears/preserves Team state per policy. Handoff files in `.omc/handoffs/` are preserved for potential resume.
 - Terminal states are `complete`, `failed`, and `cancelled`.
 
 ## Workflow
 
 ### Phase 1: Parse Input
 
-- Extract **N** (agent count), validate 1-5
+- Extract **N** (agent count), validate 1-20
 - Extract **agent-type**, validate it maps to a known OMC subagent
 - Extract **task** description
 
@@ -154,19 +227,53 @@ Call `TeamCreate` with a slug derived from the task:
 
 The current session becomes the team lead (`team-lead@fix-ts-errors`).
 
-Write OMC state for cancellation support:
+Write OMC state using the `state_write` MCP tool for proper session-scoped persistence:
 
-```json
-// .omc/state/team-state.json
-{
-  "active": true,
+```
+state_write(mode="team", active=true, current_phase="team-plan", state={
   "team_name": "fix-ts-errors",
   "agent_count": 3,
-  "agent_type": "executor",
+  "agent_types": "executor",
   "task": "fix all TypeScript errors",
-  "started_at": "2026-02-07T12:00:00Z"
-}
+  "fix_loop_count": 0,
+  "max_fix_loops": 3,
+  "linked_ralph": false,
+  "stage_history": "team-plan"
+})
 ```
+
+> **Note:** The MCP `state_write` tool transports all values as strings. Consumers must coerce `agent_count`, `fix_loop_count`, `max_fix_loops` to numbers and `linked_ralph` to boolean when reading state.
+
+**State schema fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `active` | boolean | Whether team mode is active |
+| `current_phase` | string | Current pipeline stage: `team-plan`, `team-prd`, `team-exec`, `team-verify`, `team-fix` |
+| `team_name` | string | Slug name for the team |
+| `agent_count` | number | Number of worker agents |
+| `agent_types` | string | Comma-separated agent types used in team-exec |
+| `task` | string | Original task description |
+| `fix_loop_count` | number | Current fix iteration count |
+| `max_fix_loops` | number | Maximum fix iterations before failing (default: 3) |
+| `linked_ralph` | boolean | Whether team is linked to a ralph persistence loop |
+| `stage_history` | string | Comma-separated list of stage transitions with timestamps |
+
+**Update state on every stage transition:**
+
+```
+state_write(mode="team", current_phase="team-exec", state={
+  "stage_history": "team-plan:2026-02-07T12:00:00Z,team-prd:2026-02-07T12:01:00Z,team-exec:2026-02-07T12:02:00Z"
+})
+```
+
+**Read state for resume detection:**
+
+```
+state_read(mode="team")
+```
+
+If `active=true` and `current_phase` is non-terminal, resume from the last incomplete stage instead of creating a new team.
 
 ### Phase 4: Create Tasks
 
@@ -271,6 +378,30 @@ Monitor for stuck or failed teammates:
 - **Max in-progress age**: If a task stays `in_progress` for more than 5 minutes without messages, send a status check
 - **Suspected dead worker**: No messages + stuck task for 10+ minutes → reassign task to another worker
 - **Reassign threshold**: If a worker fails 2+ tasks, stop assigning new tasks to it
+
+### Phase 6.5: Stage Transitions (State Persistence)
+
+On every stage transition, update OMC state:
+
+```
+// Entering team-exec after planning
+state_write(mode="team", current_phase="team-exec", state={
+  "stage_history": "team-plan:T1,team-prd:T2,team-exec:T3"
+})
+
+// Entering team-verify after execution
+state_write(mode="team", current_phase="team-verify")
+
+// Entering team-fix after verify failure
+state_write(mode="team", current_phase="team-fix", state={
+  "fix_loop_count": 1
+})
+```
+
+This enables:
+- **Resume**: If the lead crashes, `state_read(mode="team")` reveals the last stage and team name for recovery
+- **Cancel**: The cancel skill reads `current_phase` to know what cleanup is needed
+- **Ralph integration**: Ralph can read team state to know if the pipeline completed or failed
 
 ### Phase 7: Completion
 
@@ -382,7 +513,16 @@ Do NOT mark the task as completed. Leave it in_progress so the lead can reassign
 }
 ```
 
-### Shutdown Protocol
+### Shutdown Protocol (BLOCKING)
+
+**CRITICAL: Steps must execute in exact order. Never call TeamDelete before shutdown is confirmed.**
+
+**Step 1: Verify completion**
+```
+Call TaskList — verify all real tasks (non-internal) are completed or failed.
+```
+
+**Step 2: Request shutdown from each teammate**
 
 **Lead sends:**
 ```json
@@ -392,6 +532,11 @@ Do NOT mark the task as completed. Leave it in_progress so the lead can reassign
   "content": "All work complete, shutting down team"
 }
 ```
+
+**Step 3: Wait for responses (BLOCKING)**
+- Wait up to 30s per teammate for `shutdown_response`
+- Track which teammates confirmed vs timed out
+- If a teammate doesn't respond within 30s: log warning, mark as unresponsive
 
 **Teammate receives and responds:**
 ```json
@@ -407,11 +552,29 @@ After approval:
 - Teammate auto-removed from `config.json` members array
 - Internal task for that teammate completes
 
+**Step 4: TeamDelete — only after ALL teammates confirmed or timed out**
+```json
+{ "team_name": "fix-ts-errors" }
+```
+
+**Step 5: Orphan scan**
+
+Check for agent processes that survived TeamDelete:
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-orphans.mjs" --team-name fix-ts-errors
+```
+
+This scans for processes matching the team name whose config no longer exists, and terminates them (SIGTERM → 5s wait → SIGKILL). Supports `--dry-run` for inspection.
+
+**Shutdown sequence is BLOCKING:** Do not proceed to TeamDelete until all teammates have either:
+- Confirmed shutdown (`shutdown_response` with `approve: true`), OR
+- Timed out (30s with no response)
+
 **IMPORTANT:** The `request_id` is provided in the shutdown request message that the teammate receives. The teammate must extract it and pass it back. Do NOT fabricate request IDs.
 
-## MCP Workers (Hybrid Roles)
+## CLI Workers (Codex and Gemini)
 
-The team skill supports **hybrid execution** combining Claude agent teammates with external MCP workers (Codex and Gemini CLIs). Both types can make code changes -- they differ in capabilities and cost.
+The team skill supports **hybrid execution** combining Claude agent teammates with external CLI workers (Codex CLI and Gemini CLI). Both types can make code changes -- they differ in capabilities and cost. These are standalone CLI tools, not MCP servers.
 
 ### Execution Modes
 
@@ -420,21 +583,21 @@ Tasks are tagged with an execution mode during decomposition:
 | Execution Mode | Provider | Capabilities |
 |---------------|----------|-------------|
 | `claude_worker` | Claude agent | Full Claude Code tool access (Read/Write/Edit/Bash/Task). Best for tasks needing Claude's reasoning + iterative tool use. |
-| `mcp_codex` | Codex CLI (`ask_codex`) | Full filesystem access in working_directory. Runs autonomously. Best for code review, security analysis, refactoring, architecture. |
-| `mcp_gemini` | Gemini CLI (`ask_gemini`) | Full filesystem access + 1M token context. Runs autonomously. Best for UI/frontend work, large-scale changes, documentation. |
+| `codex_worker` | Codex CLI (tmux pane) | Full filesystem access in working_directory. Runs autonomously via tmux pane. Best for code review, security analysis, refactoring, architecture. Requires `npm install -g @openai/codex`. |
+| `gemini_worker` | Gemini CLI (tmux pane) | Full filesystem access in working_directory. Runs autonomously via tmux pane. Best for UI/design work, documentation, large-context tasks. Requires `npm install -g @google/gemini-cli`. |
 
-### How MCP Workers Operate
+### How CLI Workers Operate
 
-Codex and Gemini CLIs run in full-auto mode with filesystem access. They are **autonomous executors**, not just analysts:
+Tmux CLI workers run in dedicated tmux panes with filesystem access. They are **autonomous executors**, not just analysts:
 
-1. Lead writes task instructions to a `prompt_file`
-2. Lead calls `ask_codex` or `ask_gemini` with `working_directory` set to the project root
-3. The CLI reads files, makes changes, runs commands -- all within the working directory
-4. Results/summary are written to `output_file`
+1. Lead writes task instructions to a prompt file
+2. Lead spawns a tmux CLI worker with `working_directory` set to the project root
+3. The worker reads files, makes changes, runs commands -- all within the working directory
+4. Results/summary are written to an output file
 5. Lead reads the output, marks the task complete, and feeds results to dependent tasks
 
 **Key difference from Claude teammates:**
-- MCP workers operate via CLI, not Claude Code's tool system
+- CLI workers operate via tmux, not Claude Code's tool system
 - They cannot use TaskList/TaskUpdate/SendMessage (no team awareness)
 - They run as one-shot autonomous jobs, not persistent teammates
 - The lead manages their lifecycle (spawn, monitor, collect results)
@@ -444,46 +607,42 @@ Codex and Gemini CLIs run in full-auto mode with filesystem access. They are **a
 | Task Type | Best Route | Why |
 |-----------|-----------|-----|
 | Iterative multi-step work | Claude teammate | Needs tool-mediated iteration + team communication |
-| Code review / security audit | Codex MCP | Specialized, cheaper than Claude opus |
-| Architecture analysis / planning | Codex MCP | External perspective, strong analytical reasoning |
-| Refactoring (well-scoped) | Codex MCP | Autonomous execution, good at structured transforms |
-| UI/frontend implementation | Gemini MCP | 1M context window, design expertise, can edit many files |
-| Large-scale documentation | Gemini MCP | Writing expertise + large context for consistency |
-| Visual/image analysis | Gemini MCP | Multimodal capability |
+| Code review / security audit | CLI worker or specialist agent | Autonomous execution, good at structured analysis |
+| Architecture analysis / planning | architect Claude agent | Strong analytical reasoning with codebase access |
+| Refactoring (well-scoped) | CLI worker or executor agent | Autonomous execution, good at structured transforms |
+| UI/frontend implementation | designer Claude agent | Design expertise, framework idioms |
+| Large-scale documentation | writer Claude agent | Writing expertise + large context for consistency |
 | Build/test iteration loops | Claude teammate | Needs Bash tool + iterative fix cycles |
 | Tasks needing team coordination | Claude teammate | Needs SendMessage for status updates |
 
-### Example: Hybrid Team with MCP Executors
+### Example: Hybrid Team with CLI Workers
 
 ```
 /team 3:executor "refactor auth module with security review"
 
 Task decomposition:
-#1 [mcp_codex] Security review of current auth code -> output to .omc/research/auth-security.md
-#2 [mcp_codex] Refactor auth/login.ts and auth/session.ts (uses #1 findings)
-#3 [mcp_gemini] Redesign auth UI components (login form, session indicator)
+#1 [codex_worker] Security review of current auth code -> output to .omc/research/auth-security.md
+#2 [codex_worker] Refactor auth/login.ts and auth/session.ts (uses #1 findings)
+#3 [claude_worker:designer] Redesign auth UI components (login form, session indicator)
 #4 [claude_worker] Update auth tests + fix integration issues
-#5 [mcp_codex] Final code review of all changes
+#5 [gemini_worker] Final code review of all changes
 ```
 
-The lead runs #1 (Codex analysis), then #2 and #3 in parallel (Codex refactors backend, Gemini redesigns frontend), then #4 (Claude teammate handles test iteration), then #5 (final Codex review).
+The lead runs #1 (Codex security analysis), then #2 and #3 in parallel (Codex refactors backend, designer agent redesigns frontend), then #4 (Claude teammate handles test iteration), then #5 (Gemini final review).
 
-### MCP Pre-flight Analysis (Optional)
+### Pre-flight Analysis (Optional)
 
 For large ambiguous tasks, run analysis before team creation:
 
-1. Call `ToolSearch("mcp")` to discover deferred MCP tools (required before first use)
-2. Call `ask_codex` (planner role) with task description + codebase context
-3. Use the analysis to produce better task decomposition
-4. Create team and tasks with enriched context
-
-If ToolSearch finds no MCP tools, skip MCP pre-flight and use Claude agents instead.
+1. Spawn `Task(subagent_type="oh-my-claudecode:planner", ...)` with task description + codebase context
+2. Use the analysis to produce better task decomposition
+3. Create team and tasks with enriched context
 
 This is especially useful when the task scope is unclear and benefits from external reasoning before committing to a specific decomposition.
 
 ## Monitor Enhancement: Outbox Auto-Ingestion
 
-The lead can proactively ingest outbox messages from MCP workers using the outbox reader utilities, enabling event-driven monitoring without relying solely on `SendMessage` delivery.
+The lead can proactively ingest outbox messages from CLI workers using the outbox reader utilities, enabling event-driven monitoring without relying solely on `SendMessage` delivery.
 
 ### Outbox Reader Functions
 
@@ -571,6 +730,57 @@ This approach complements the existing `SendMessage`-based communication by prov
 3. Lead reassigns orphaned tasks to remaining workers
 4. If needed, spawn a replacement teammate with `Task(team_name, name)`
 
+## Team + Ralph Composition
+
+When the user invokes `/team ralph`, says "team ralph", or combines both keywords, team mode wraps itself in Ralph's persistence loop. This provides:
+
+- **Team orchestration** -- multi-agent staged pipeline with specialized agents per stage
+- **Ralph persistence** -- retry on failure, architect verification before completion, iteration tracking
+
+### Activation
+
+Team+Ralph activates when:
+1. User invokes `/team ralph "task"` or `/oh-my-claudecode:team ralph "task"`
+2. Keyword detector finds both `team` and `ralph` in the prompt
+3. Hook detects `MAGIC KEYWORD: RALPH` alongside team context
+
+### State Linkage
+
+Both modes write their own state files with cross-references:
+
+```
+// Team state (via state_write)
+state_write(mode="team", active=true, current_phase="team-plan", state={
+  "team_name": "build-rest-api",
+  "linked_ralph": true,
+  "task": "build a complete REST API"
+})
+
+// Ralph state (via state_write)
+state_write(mode="ralph", active=true, iteration=1, max_iterations=10, current_phase="execution", state={
+  "linked_team": true,
+  "team_name": "build-rest-api"
+})
+```
+
+### Execution Flow
+
+1. Ralph outer loop starts (iteration 1)
+2. Team pipeline runs: `team-plan -> team-prd -> team-exec -> team-verify`
+3. If `team-verify` passes: Ralph runs architect verification (STANDARD tier minimum)
+4. If architect approves: both modes complete, run `/oh-my-claudecode:cancel`
+5. If `team-verify` fails OR architect rejects: team enters `team-fix`, then loops back to `team-exec -> team-verify`
+6. If fix loop exceeds `max_fix_loops`: Ralph increments iteration and retries the full pipeline
+7. If Ralph exceeds `max_iterations`: terminal `failed` state
+
+### Cancellation
+
+Cancel either mode cancels both:
+- **Cancel Ralph (linked):** Cancel Team first (graceful shutdown), then clear Ralph state
+- **Cancel Team (linked):** Clear Team, mark Ralph iteration cancelled, stop loop
+
+See Cancellation section below for details.
+
 ## Idempotent Recovery
 
 If the lead crashes mid-run, the team skill should detect existing state and resume:
@@ -607,11 +817,20 @@ This prevents duplicate teams and allows graceful recovery from lead failures.
 
 The `/oh-my-claudecode:cancel` skill handles team cleanup:
 
-1. Read `.omc/state/team-state.json` to get the `team_name`
+1. Read team state via `state_read(mode="team")` to get `team_name` and `linked_ralph`
 2. Send `shutdown_request` to all active teammates (from `config.json` members)
-3. Wait for `shutdown_response` from each
+3. Wait for `shutdown_response` from each (15s timeout per member)
 4. Call `TeamDelete` to remove team and task directories
-5. Delete `.omc/state/team-state.json`
+5. Clear state via `state_clear(mode="team")`
+6. If `linked_ralph` is true, also clear ralph: `state_clear(mode="ralph")`
+
+### Linked Mode Cancellation (Team + Ralph)
+
+When team is linked to ralph, cancellation follows dependency order:
+
+- **Cancel triggered from Ralph context:** Cancel Team first (graceful shutdown of all teammates), then clear Ralph state. This ensures workers are stopped before the persistence loop exits.
+- **Cancel triggered from Team context:** Clear Team state, then mark Ralph as cancelled. Ralph's stop hook will detect the missing team and stop iterating.
+- **Force cancel (`--force`):** Clears both `team` and `ralph` state unconditionally via `state_clear`.
 
 If teammates are unresponsive, `TeamDelete` may fail. In that case, the cancel skill should wait briefly and retry, or inform the user to manually clean up `~/.claude/teams/{team_name}/` and `~/.claude/tasks/{team_name}/`.
 
@@ -622,7 +841,7 @@ Optional settings via `.omc-config.json`:
 ```json
 {
   "team": {
-    "maxAgents": 5,
+    "maxAgents": 20,
     "defaultAgentType": "executor",
     "monitorIntervalMs": 30000,
     "shutdownTimeoutMs": 15000
@@ -630,7 +849,7 @@ Optional settings via `.omc-config.json`:
 }
 ```
 
-- **maxAgents** - Maximum teammates (hard cap: 5)
+- **maxAgents** - Maximum teammates (default: 20)
 - **defaultAgentType** - Agent type when not specified (default: `executor`)
 - **monitorIntervalMs** - How often to poll `TaskList` (default: 30s)
 - **shutdownTimeoutMs** - How long to wait for shutdown responses (default: 15s)
@@ -644,10 +863,15 @@ On successful completion:
 1. `TeamDelete` handles all Claude Code state:
    - Removes `~/.claude/teams/{team_name}/` (config)
    - Removes `~/.claude/tasks/{team_name}/` (all task files + lock)
-2. OMC state cleanup:
-   ```bash
-   rm -f .omc/state/team-state.json
+2. OMC state cleanup via MCP tools:
    ```
+   state_clear(mode="team")
+   ```
+   If linked to Ralph:
+   ```
+   state_clear(mode="ralph")
+   ```
+3. Or run `/oh-my-claudecode:cancel` which handles all cleanup automatically.
 
 **IMPORTANT:** Call `TeamDelete` only AFTER all teammates have been shut down. `TeamDelete` will fail if active members (besides the lead) still exist in the config.
 
@@ -706,4 +930,4 @@ MCP workers can operate in isolated git worktrees to prevent file conflicts betw
 
 10. **Broadcast is expensive** -- Each broadcast sends a separate message to every teammate. Use `message` (DM) by default. Only broadcast for truly team-wide critical alerts.
 
-11. **MCP workers are one-shot, not persistent** -- Codex and Gemini CLIs have full filesystem access and CAN make code changes. However, they run as autonomous one-shot jobs -- they cannot use TaskList/TaskUpdate/SendMessage. The lead must manage their lifecycle: write prompt_file, call MCP, read output_file, mark task complete. They don't participate in team communication like Claude teammates do.
+11. **CLI workers are one-shot, not persistent** -- Tmux CLI workers have full filesystem access and CAN make code changes. However, they run as autonomous one-shot jobs -- they cannot use TaskList/TaskUpdate/SendMessage. The lead must manage their lifecycle: write prompt_file, spawn CLI worker, read output_file, mark task complete. They don't participate in team communication like Claude teammates do.

@@ -12,6 +12,16 @@ import { pathToFileURL } from 'url';
 import type { LspServerConfig } from './servers.js';
 import { getServerForFile, commandExists } from './servers.js';
 
+/** Default timeout (ms) for LSP requests. Override with OMC_LSP_TIMEOUT_MS env var. */
+export const DEFAULT_LSP_REQUEST_TIMEOUT_MS: number = (() => {
+  const env = process.env.OMC_LSP_TIMEOUT_MS;
+  if (env) {
+    const parsed = parseInt(env, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 15_000;
+})();
+
 /** Convert a file path to a valid file:// URI (cross-platform) */
 function fileUri(filePath: string): string {
   return pathToFileURL(resolve(filePath)).href;
@@ -118,9 +128,10 @@ export class LspClient {
     reject: (error: Error) => void;
     timeout: NodeJS.Timeout;
   }>();
-  private buffer = '';
+  private buffer = Buffer.alloc(0);
   private openDocuments = new Set<string>();
   private diagnostics = new Map<string, Diagnostic[]>();
+  private diagnosticWaiters = new Map<string, Array<() => void>>();
   private workspaceRoot: string;
   private serverConfig: LspServerConfig;
   private initialized = false;
@@ -148,11 +159,14 @@ export class LspClient {
     return new Promise((resolve, reject) => {
       this.process = spawn(this.serverConfig.command, this.serverConfig.args, {
         cwd: this.workspaceRoot,
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // On Windows, npm-installed binaries are .cmd scripts that require
+        // shell execution. Without this, spawn() fails with ENOENT. (#569)
+        shell: process.platform === 'win32'
       });
 
       this.process.stdout?.on('data', (data: Buffer) => {
-        this.handleData(data.toString());
+        this.handleData(data);
       });
 
       this.process.stderr?.on('data', (data: Buffer) => {
@@ -170,6 +184,8 @@ export class LspClient {
         if (code !== 0) {
           console.error(`LSP server exited with code ${code}`);
         }
+        // Reject all pending requests to avoid unresolved promises
+        this.rejectPendingRequests(new Error(`LSP server exited (code ${code})`));
       });
 
       // Send initialize request
@@ -204,21 +220,33 @@ export class LspClient {
   }
 
   /**
+   * Reject all pending requests with the given error.
+   * Called on process exit to avoid dangling unresolved promises.
+   */
+  private rejectPendingRequests(error: Error): void {
+    for (const [id, pending] of this.pendingRequests.entries()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.pendingRequests.delete(id);
+    }
+  }
+
+  /**
    * Handle incoming data from the server
    */
-  private handleData(data: string): void {
-    this.buffer += data;
+  private handleData(data: Buffer): void {
+    this.buffer = Buffer.concat([this.buffer, data]);
 
     while (true) {
       // Look for Content-Length header
       const headerEnd = this.buffer.indexOf('\r\n\r\n');
       if (headerEnd === -1) break;
 
-      const header = this.buffer.slice(0, headerEnd);
+      const header = this.buffer.subarray(0, headerEnd).toString();
       const contentLengthMatch = header.match(/Content-Length: (\d+)/i);
       if (!contentLengthMatch) {
         // Invalid header, try to recover
-        this.buffer = this.buffer.slice(headerEnd + 4);
+        this.buffer = this.buffer.subarray(headerEnd + 4);
         continue;
       }
 
@@ -230,8 +258,8 @@ export class LspClient {
         break; // Not enough data yet
       }
 
-      const messageJson = this.buffer.slice(messageStart, messageEnd);
-      this.buffer = this.buffer.slice(messageEnd);
+      const messageJson = this.buffer.subarray(messageStart, messageEnd).toString();
+      this.buffer = this.buffer.subarray(messageEnd);
 
       try {
         const message = JSON.parse(messageJson);
@@ -272,6 +300,12 @@ export class LspClient {
     if (notification.method === 'textDocument/publishDiagnostics') {
       const params = notification.params as { uri: string; diagnostics: Diagnostic[] };
       this.diagnostics.set(params.uri, params.diagnostics);
+      // Wake any waiters registered via waitForDiagnostics()
+      const waiters = this.diagnosticWaiters.get(params.uri);
+      if (waiters && waiters.length > 0) {
+        this.diagnosticWaiters.delete(params.uri);
+        for (const wake of waiters) wake();
+      }
     }
     // Handle other notifications as needed
   }
@@ -279,7 +313,7 @@ export class LspClient {
   /**
    * Send a request to the server
    */
-  private async request<T>(method: string, params: unknown, timeout = 15000): Promise<T> {
+  private async request<T>(method: string, params: unknown, timeout = DEFAULT_LSP_REQUEST_TIMEOUT_MS): Promise<T> {
     if (!this.process?.stdin) {
       throw new Error('LSP server not connected');
     }
@@ -405,7 +439,9 @@ export class LspClient {
    * Get the language ID for a file
    */
   private getLanguageId(filePath: string): string {
-    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+    // parse().ext correctly handles dotfiles: parse('.eslintrc').ext === ''
+    // whereas split('.').pop() returns 'eslintrc' for dotfiles (incorrect)
+    const ext = parse(filePath).ext.slice(1).toLowerCase();
     const langMap: Record<string, string> = {
       'ts': 'typescript',
       'tsx': 'typescriptreact',
@@ -515,6 +551,43 @@ export class LspClient {
   getDiagnostics(filePath: string): Diagnostic[] {
     const uri = fileUri(filePath);
     return this.diagnostics.get(uri) || [];
+  }
+
+  /**
+   * Wait for the server to publish diagnostics for a file.
+   * Resolves as soon as textDocument/publishDiagnostics fires for the URI,
+   * or after `timeoutMs` milliseconds (whichever comes first).
+   * This replaces fixed-delay sleeps with a notification-driven approach.
+   */
+  waitForDiagnostics(filePath: string, timeoutMs = 2000): Promise<void> {
+    const uri = fileUri(filePath);
+
+    // If diagnostics are already present, resolve immediately.
+    if (this.diagnostics.has(uri)) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      let resolved = false;
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          this.diagnosticWaiters.delete(uri);
+          resolve();
+        }
+      }, timeoutMs);
+
+      // Store the resolver so handleNotification can wake it up.
+      const existing = this.diagnosticWaiters.get(uri) || [];
+      existing.push(() => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      this.diagnosticWaiters.set(uri, existing);
+    });
   }
 
   /**

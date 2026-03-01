@@ -7,6 +7,8 @@ description: Setup and configure oh-my-claudecode (the ONLY command you need to 
 
 This is the **only command you need to learn**. After running this, everything else is automatic.
 
+Note: All `~/.claude/...` paths in this guide respect `CLAUDE_CONFIG_DIR` when that environment variable is set.
+
 ## Pre-Setup Check: Already Configured?
 
 **CRITICAL**: Before doing anything else, check if setup has already been completed. This prevents users from having to re-run the full setup wizard after every update.
@@ -224,8 +226,8 @@ fi
 
 # Strip existing markers from downloaded content (idempotency)
 if grep -q '<!-- OMC:START -->' "$TEMP_OMC"; then
-  # Extract content between markers
-  sed -n '/<!-- OMC:START -->/,/<!-- OMC:END -->/{//!p}' "$TEMP_OMC" > "${TEMP_OMC}.clean"
+  # Extract content between markers (awk is portable across GNU/BSD)
+  awk '/<!-- OMC:END -->/{p=0} p; /<!-- OMC:START -->/{p=1}' "$TEMP_OMC" > "${TEMP_OMC}.clean"
   mv "${TEMP_OMC}.clean" "$TEMP_OMC"
 fi
 
@@ -242,8 +244,9 @@ else
   # Merge: preserve user content outside OMC markers
   if grep -q '<!-- OMC:START -->' "$TARGET_PATH"; then
     # Has markers: replace OMC section, keep user content
-    BEFORE_OMC=$(sed -n '1,/<!-- OMC:START -->/{ /<!-- OMC:START -->/!p }' "$TARGET_PATH")
-    AFTER_OMC=$(sed -n '/<!-- OMC:END -->/,${  /<!-- OMC:END -->/!p }' "$TARGET_PATH")
+    # Use awk instead of sed for cross-platform compatibility (GNU/BSD)
+    BEFORE_OMC=$(awk '/<!-- OMC:START -->/{exit} {print}' "$TARGET_PATH")
+    AFTER_OMC=$(awk 'p; /<!-- OMC:END -->/{p=1}' "$TARGET_PATH")
     {
       [ -n "$BEFORE_OMC" ] && printf '%s\n' "$BEFORE_OMC"
       echo '<!-- OMC:START -->'
@@ -363,8 +366,8 @@ fi
 
 # Strip existing markers from downloaded content (idempotency)
 if grep -q '<!-- OMC:START -->' "$TEMP_OMC"; then
-  # Extract content between markers
-  sed -n '/<!-- OMC:START -->/,/<!-- OMC:END -->/{//!p}' "$TEMP_OMC" > "${TEMP_OMC}.clean"
+  # Extract content between markers (awk is portable across GNU/BSD)
+  awk '/<!-- OMC:END -->/{p=0} p; /<!-- OMC:START -->/{p=1}' "$TEMP_OMC" > "${TEMP_OMC}.clean"
   mv "${TEMP_OMC}.clean" "$TEMP_OMC"
 fi
 
@@ -381,8 +384,9 @@ else
   # Merge: preserve user content outside OMC markers
   if grep -q '<!-- OMC:START -->' "$TARGET_PATH"; then
     # Has markers: replace OMC section, keep user content
-    BEFORE_OMC=$(sed -n '1,/<!-- OMC:START -->/{ /<!-- OMC:START -->/!p }' "$TARGET_PATH")
-    AFTER_OMC=$(sed -n '/<!-- OMC:END -->/,${  /<!-- OMC:END -->/!p }' "$TARGET_PATH")
+    # Use awk instead of sed for cross-platform compatibility (GNU/BSD)
+    BEFORE_OMC=$(awk '/<!-- OMC:START -->/{exit} {print}' "$TARGET_PATH")
+    AFTER_OMC=$(awk 'p; /<!-- OMC:END -->/{p=1}' "$TARGET_PATH")
     {
       [ -n "$BEFORE_OMC" ] && printf '%s\n' "$BEFORE_OMC"
       echo '<!-- OMC:START -->'
@@ -509,21 +513,8 @@ EOF
 Clear old cached plugin versions to avoid conflicts:
 
 ```bash
-# Clear stale plugin cache versions
-CACHE_DIR="$HOME/.claude/plugins/cache/omc/oh-my-claudecode"
-if [ -d "$CACHE_DIR" ]; then
-  LATEST=$(ls -1 "$CACHE_DIR" | sort -V | tail -1)
-  CLEARED=0
-  for dir in "$CACHE_DIR"/*; do
-    if [ "$(basename "$dir")" != "$LATEST" ]; then
-      rm -rf "$dir"
-      CLEARED=$((CLEARED + 1))
-    fi
-  done
-  [ $CLEARED -gt 0 ] && echo "Cleared $CLEARED stale cache version(s)" || echo "Cache is clean"
-else
-  echo "No cache directory found (normal for new installs)"
-fi
+# Clear stale plugin cache versions (cross-platform)
+node -e "const p=require('path'),f=require('fs'),h=require('os').homedir(),d=process.env.CLAUDE_CONFIG_DIR||p.join(h,'.claude'),b=p.join(d,'plugins','cache','omc','oh-my-claudecode');try{const v=f.readdirSync(b).filter(x=>/^\d/.test(x)).sort((a,c)=>a.localeCompare(c,void 0,{numeric:true}));if(v.length<=1){console.log('Cache is clean');process.exit()}v.slice(0,-1).forEach(x=>{f.rmSync(p.join(b,x),{recursive:true,force:true})});console.log('Cleared',v.length-1,'stale cache version(s)')}catch{console.log('No cache directory found (normal for new installs)')}"
 ```
 
 ## Step 3.6: Check for Updates
@@ -531,27 +522,20 @@ fi
 Notify user if a newer version is available:
 
 ```bash
-# Detect installed version
-INSTALLED_VERSION=""
-
-# Try cache directory first
-if [ -d "$HOME/.claude/plugins/cache/omc/oh-my-claudecode" ]; then
-  INSTALLED_VERSION=$(ls -1 "$HOME/.claude/plugins/cache/omc/oh-my-claudecode" | sort -V | tail -1)
-fi
-
-# Try .omc-version.json second
-if [ -z "$INSTALLED_VERSION" ] && [ -f ".omc-version.json" ]; then
-  INSTALLED_VERSION=$(grep -oE '"version":\s*"[^"]+' .omc-version.json | cut -d'"' -f4)
-fi
-
-# Try CLAUDE.md header third (local first, then global)
-if [ -z "$INSTALLED_VERSION" ]; then
-  if [ -f ".claude/CLAUDE.md" ]; then
-    INSTALLED_VERSION=$(grep -m1 "^# oh-my-claudecode" .claude/CLAUDE.md 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^v//')
-  elif [ -f "$HOME/.claude/CLAUDE.md" ]; then
-    INSTALLED_VERSION=$(grep -m1 "^# oh-my-claudecode" "$HOME/.claude/CLAUDE.md" 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^v//')
-  fi
-fi
+# Detect installed version (cross-platform)
+node -e "
+const p=require('path'),f=require('fs'),h=require('os').homedir();
+const d=process.env.CLAUDE_CONFIG_DIR||p.join(h,'.claude');
+let v='';
+// Try cache directory first
+const b=p.join(d,'plugins','cache','omc','oh-my-claudecode');
+try{const vs=f.readdirSync(b).filter(x=>/^\d/.test(x)).sort((a,c)=>a.localeCompare(c,void 0,{numeric:true}));if(vs.length)v=vs[vs.length-1]}catch{}
+// Try .omc-version.json second
+if(v==='')try{const j=JSON.parse(f.readFileSync('.omc-version.json','utf-8'));v=j.version||''}catch{}
+// Try CLAUDE.md header third
+if(v==='')for(const c of['.claude/CLAUDE.md',p.join(d,'CLAUDE.md')]){try{const m=f.readFileSync(c,'utf-8').match(/^# oh-my-claudecode.*?(v?\d+\.\d+\.\d+)/m);if(m){v=m[1].replace(/^v/,'');break}}catch{}}
+console.log('Installed:',v||'(not found)');
+"
 
 # Check npm for latest version
 LATEST_VERSION=$(npm view oh-my-claude-sisyphus version 2>/dev/null)
@@ -581,7 +565,6 @@ Use the AskUserQuestion tool to prompt the user:
 
 **Options:**
 1. **ultrawork (maximum capability)** - Uses all agent tiers including Opus for complex tasks. Best for challenging work where quality matters most. (Recommended)
-2. **ecomode (token efficient)** - Prefers Haiku/Sonnet agents, avoids Opus. Best for pro-plan users who want cost efficiency.
 
 Store the preference in `~/.claude/.omc-config.json`:
 
@@ -596,41 +579,70 @@ else
   EXISTING='{}'
 fi
 
-# Set defaultExecutionMode (replace USER_CHOICE with "ultrawork" or "ecomode")
+# Set defaultExecutionMode (replace USER_CHOICE with "ultrawork" or "")
 echo "$EXISTING" | jq --arg mode "USER_CHOICE" '. + {defaultExecutionMode: $mode, configuredAt: (now | todate)}' > "$CONFIG_FILE"
 echo "Default execution mode set to: USER_CHOICE"
 ```
 
-**Note**: This preference ONLY affects generic keywords ("fast", "parallel"). Explicit keywords ("ulw", "eco") always override this preference.
+**Note**: This preference ONLY affects generic keywords ("fast", "parallel"). Explicit keywords ("ulw") always override this preference.
 
-### Optional: Disable Ecomode Entirely
 
-If the user wants to disable ecomode completely (so ecomode keywords are ignored), add to the config:
+## Step 3.8: Install OMC CLI Tool
+
+The OMC CLI (`omc` command) provides standalone token analytics and management commands (`omc stats`, `omc agents`, `omc tui`).
+
+First, check if the CLI is already installed:
 
 ```bash
-echo "$EXISTING" | jq '. + {ecomode: {enabled: false}}' > "$CONFIG_FILE"
-echo "Ecomode disabled completely"
+# Check if omc CLI is already available
+if command -v omc &>/dev/null; then
+  OMC_CLI_VERSION=$(omc --version 2>/dev/null | head -1 || echo "installed")
+  echo "OMC CLI already installed: $OMC_CLI_VERSION"
+  OMC_CLI_INSTALLED="true"
+else
+  OMC_CLI_INSTALLED="false"
+fi
 ```
 
-## Step 3.8: Install CLI Analytics Tools (Optional)
+If `OMC_CLI_INSTALLED` is `"true"`, skip the rest of this step.
 
-The OMC CLI provides standalone token analytics commands (`omc stats`, `omc agents`, `omc tui`).
+If `OMC_CLI_INSTALLED` is `"false"`, use the AskUserQuestion tool to prompt the user:
 
-Ask user: "Would you like to install the OMC CLI for standalone analytics? (Recommended for tracking token usage and costs)"
+**Question:** "Would you like to install the OMC CLI globally for standalone analytics? (`omc stats`, `omc agents`, `omc tui`)"
 
 **Options:**
-1. **Yes (Recommended)** - Install CLI tools globally for `omc stats`, `omc agents`, etc.
-2. **No** - Skip CLI installation, use only plugin skills
+1. **Yes (Recommended)** - Install `oh-my-claude-sisyphus` via `npm install -g`
+2. **No - Skip** - Skip installation (can install manually later with `npm install -g oh-my-claude-sisyphus`)
 
-### CLI Installation Note
+If user chooses **Yes**:
 
-The CLI (`omc` command) is **no longer supported** via npm/bun global install.
+```bash
+# Check if npm is available
+if ! command -v npm &>/dev/null; then
+  echo "WARNING: npm not found. Cannot install OMC CLI automatically."
+  echo "Install Node.js/npm first, then run: npm install -g oh-my-claude-sisyphus"
+else
+  # Install the CLI globally
+  if npm install -g oh-my-claude-sisyphus 2>&1; then
+    echo "OMC CLI installed successfully."
+    # Verify installation
+    if command -v omc &>/dev/null; then
+      OMC_CLI_VERSION=$(omc --version 2>/dev/null | head -1 || echo "installed")
+      echo "Verified: omc $OMC_CLI_VERSION"
+    else
+      echo "Installed but 'omc' not on PATH. You may need to restart your shell."
+    fi
+  else
+    echo "WARNING: Failed to install OMC CLI (permission issue or network error)."
+    echo "You can install manually later: npm install -g oh-my-claude-sisyphus"
+    echo "Or with sudo: sudo npm install -g oh-my-claude-sisyphus"
+  fi
+fi
+```
 
-All functionality is available through the plugin system:
-- Use `/oh-my-claudecode:help` for guidance
-- Use `/oh-my-claudecode:doctor` for diagnostics
+If user chooses **No - Skip**, continue to the next step without installing.
 
-Skip this step - the plugin provides all features.
+**Note**: The CLI is optional. All core functionality is also available through the plugin system (`/oh-my-claudecode:omc-help`, `/oh-my-claudecode:omc-doctor`). The CLI adds standalone terminal commands for analytics outside of Claude Code sessions.
 
 ## Step 3.8.5: Select Task Management Tool
 
@@ -825,13 +837,6 @@ Use the AskUserQuestion tool with multiple questions:
 2. **build-fixer** - Specialized for build/type error fixing
 3. **designer** - Specialized for UI/frontend work
 
-**Question 3:** "Which model should teammates use by default?"
-
-**Options:**
-1. **sonnet (Recommended)** - Fast, capable, cost-effective for most tasks
-2. **opus** - Maximum capability for complex tasks (higher cost)
-3. **haiku** - Fastest and cheapest, good for simple/repetitive tasks
-
 Store the team configuration in `~/.claude/.omc-config.json`:
 
 ```bash
@@ -844,18 +849,19 @@ else
   EXISTING='{}'
 fi
 
-# Replace MAX_AGENTS, AGENT_TYPE, MODEL with user choices
+# Replace MAX_AGENTS, AGENT_TYPE with user choices
 echo "$EXISTING" | jq \
   --argjson maxAgents MAX_AGENTS \
   --arg agentType "AGENT_TYPE" \
-  --arg model "MODEL" \
-  '. + {team: {maxAgents: $maxAgents, defaultAgentType: $agentType, defaultModel: $model, monitorIntervalMs: 30000, shutdownTimeoutMs: 15000}}' > "$CONFIG_FILE"
+  '. + {team: {maxAgents: $maxAgents, defaultAgentType: $agentType, monitorIntervalMs: 30000, shutdownTimeoutMs: 15000}}' > "$CONFIG_FILE"
 
 echo "Team configuration saved:"
 echo "  Max agents: MAX_AGENTS"
 echo "  Default agent: AGENT_TYPE"
-echo "  Default model: MODEL"
+echo "  Model: teammates inherit your session model"
 ```
+
+**Note:** Teammates do not have a separate model default. Each teammate is a full Claude Code session that inherits your configured model. Subagents spawned by teammates can use any model tier.
 
 #### Verify settings.json Integrity
 
@@ -947,7 +953,6 @@ Just include these words naturally in your request:
 | ralph | Persistence mode | "ralph: fix the auth bug" |
 | ralplan | Iterative planning | "ralplan this feature" |
 | ulw | Max parallelism | "ulw refactor the API" |
-| eco | Token-efficient mode | "eco refactor the API" |
 | plan | Planning interview | "plan the new endpoints" |
 | team | Coordinated agents | "/team 3:executor fix errors" |
 
@@ -995,7 +1000,6 @@ MAGIC KEYWORDS (power-user shortcuts):
 | ralph | /ralph | "ralph: fix the bug" |
 | ralplan | /ralplan | "ralplan this feature" |
 | ulw | /ultrawork | "ulw refactor API" |
-| eco | (new!) | "eco fix all errors" |
 | plan | /plan | "plan the endpoints" |
 | team | (new!) | "/team 3:executor fix errors" |
 
@@ -1025,6 +1029,18 @@ gh auth status &>/dev/null
 ```
 
 ### If gh is available and authenticated:
+
+**Before prompting, check if the repository is already starred:**
+
+```bash
+gh api user/starred/Yeachan-Heo/oh-my-claudecode &>/dev/null
+```
+
+**If already starred (exit code 0):**
+- Skip the prompt entirely
+- Continue to next step silently
+
+**If NOT starred (exit code non-zero):**
 
 Use the AskUserQuestion tool to prompt the user:
 
@@ -1149,3 +1165,24 @@ EXAMPLES:
 
 For more info: https://github.com/Yeachan-Heo/oh-my-claudecode
 ```
+
+## Optional Rule Templates
+
+OMC includes rule templates you can copy to your project's `.claude/rules/` directory for automatic context injection:
+
+| Template | Purpose |
+|----------|---------|
+| `coding-style.md` | Code style, immutability, file organization |
+| `testing.md` | TDD workflow, 80% coverage target |
+| `security.md` | Secret management, input validation |
+| `performance.md` | Model selection, context management |
+| `git-workflow.md` | Commit conventions, PR workflow |
+| `karpathy-guidelines.md` | Coding discipline — think before coding, simplicity, surgical changes |
+
+Copy with:
+```bash
+mkdir -p .claude/rules
+cp "${CLAUDE_PLUGIN_ROOT}/templates/rules/"*.md .claude/rules/
+```
+
+See `templates/rules/README.md` for details.

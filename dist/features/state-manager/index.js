@@ -15,10 +15,13 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { atomicWriteJsonSync } from "../../lib/atomic-write.js";
-import { OmcPaths } from "../../lib/worktree-paths.js";
+import { OmcPaths, getWorktreeRoot, validateWorkingDirectory } from "../../lib/worktree-paths.js";
 import { StateLocation, DEFAULT_STATE_CONFIG, } from "./types.js";
 // Standard state directories
-const LOCAL_STATE_DIR = OmcPaths.STATE;
+/** Get the absolute path to the local state directory, resolved from the git worktree root. */
+function getLocalStateDir() {
+    return path.join(validateWorkingDirectory(), OmcPaths.STATE);
+}
 /**
  * @deprecated for mode state. Global state directory is only used for analytics and daemon state.
  * Mode state should use LOCAL_STATE_DIR exclusively.
@@ -38,24 +41,24 @@ export function clearStateCache() {
 }
 // Legacy state locations (for backward compatibility)
 const LEGACY_LOCATIONS = {
-    boulder: [".omc/boulder.json"],
-    autopilot: [".omc/autopilot-state.json"],
-    "autopilot-state": [".omc/autopilot-state.json"],
-    ralph: [".omc/ralph-state.json"],
-    "ralph-state": [".omc/ralph-state.json"],
-    "ralph-verification": [".omc/ralph-verification.json"],
-    ultrawork: [".omc/ultrawork-state.json"],
-    "ultrawork-state": [".omc/ultrawork-state.json"],
-    ultraqa: [".omc/ultraqa-state.json"],
-    "ultraqa-state": [".omc/ultraqa-state.json"],
-    "hud-state": [".omc/hud-state.json"],
-    prd: [".omc/prd.json"],
+    boulder: [".omc/state/boulder.json"],
+    autopilot: [".omc/state/autopilot-state.json"],
+    "autopilot-state": [".omc/state/autopilot-state.json"],
+    ralph: [".omc/state/ralph-state.json"],
+    "ralph-state": [".omc/state/ralph-state.json"],
+    "ralph-verification": [".omc/state/ralph-verification.json"],
+    ultrawork: [".omc/state/ultrawork-state.json"],
+    "ultrawork-state": [".omc/state/ultrawork-state.json"],
+    ultraqa: [".omc/state/ultraqa-state.json"],
+    "ultraqa-state": [".omc/state/ultraqa-state.json"],
+    "hud-state": [".omc/state/hud-state.json"],
+    prd: [".omc/state/prd.json"],
 };
 /**
  * Get the standard path for a state file
  */
 export function getStatePath(name, location) {
-    const baseDir = location === StateLocation.LOCAL ? LOCAL_STATE_DIR : GLOBAL_STATE_DIR;
+    const baseDir = location === StateLocation.LOCAL ? getLocalStateDir() : GLOBAL_STATE_DIR;
     return path.join(baseDir, `${name}.json`);
 }
 /**
@@ -68,7 +71,7 @@ export function getLegacyPaths(name) {
  * Ensure state directory exists
  */
 export function ensureStateDir(location) {
-    const dir = location === StateLocation.LOCAL ? LOCAL_STATE_DIR : GLOBAL_STATE_DIR;
+    const dir = location === StateLocation.LOCAL ? getLocalStateDir() : GLOBAL_STATE_DIR;
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -85,12 +88,15 @@ export function readState(name, location = StateLocation.LOCAL, options) {
     const legacyPaths = checkLegacy ? getLegacyPaths(name) : [];
     // Try standard location first
     if (fs.existsSync(standardPath)) {
-        // Check cache: if entry exists, mtime matches, and TTL not expired, return cached data
         try {
-            const stat = fs.statSync(standardPath);
-            const mtime = stat.mtimeMs;
+            // Get mtime BEFORE reading to prevent TOCTOU cache poisoning.
+            // Previously mtime was read AFTER readFileSync, so a concurrent write
+            // between the two could cache stale data under the new mtime.
+            const statBefore = fs.statSync(standardPath);
+            const mtimeBefore = statBefore.mtimeMs;
+            // Check cache: entry exists, mtime matches, TTL not expired
             const cached = stateCache.get(standardPath);
-            if (cached && cached.mtime === mtime && (Date.now() - cached.cachedAt) < STATE_CACHE_TTL_MS) {
+            if (cached && cached.mtime === mtimeBefore && (Date.now() - cached.cachedAt) < STATE_CACHE_TTL_MS) {
                 return {
                     exists: true,
                     data: structuredClone(cached.data),
@@ -98,20 +104,20 @@ export function readState(name, location = StateLocation.LOCAL, options) {
                     legacyLocations: [],
                 };
             }
-        }
-        catch {
-            // statSync failed, proceed to read
-        }
-        try {
+            // Cache miss or stale — read from disk
             const content = fs.readFileSync(standardPath, "utf-8");
             const data = JSON.parse(content);
-            // Update cache with a defensive clone so callers cannot corrupt it
+            // Verify mtime unchanged during read to prevent caching inconsistent data.
+            // If the file was modified between our statBefore and readFileSync, we still
+            // return the data but do NOT cache it — the next read will re-read from disk.
             try {
-                const stat = fs.statSync(standardPath);
-                stateCache.set(standardPath, { data: structuredClone(data), mtime: stat.mtimeMs, cachedAt: Date.now() });
+                const statAfter = fs.statSync(standardPath);
+                if (statAfter.mtimeMs === mtimeBefore) {
+                    stateCache.set(standardPath, { data: structuredClone(data), mtime: mtimeBefore, cachedAt: Date.now() });
+                }
             }
             catch {
-                // statSync failed, skip caching
+                // statSync failed — skip caching, data is still returned
             }
             return {
                 exists: true,
@@ -131,14 +137,14 @@ export function readState(name, location = StateLocation.LOCAL, options) {
             // Resolve relative paths
             const resolvedPath = path.isAbsolute(legacyPath)
                 ? legacyPath
-                : path.join(process.cwd(), legacyPath);
+                : path.join(getWorktreeRoot() || process.cwd(), legacyPath);
             if (fs.existsSync(resolvedPath)) {
                 try {
                     const content = fs.readFileSync(resolvedPath, "utf-8");
                     const data = JSON.parse(content);
                     return {
                         exists: true,
-                        data,
+                        data: structuredClone(data),
                         foundAt: resolvedPath,
                         legacyLocations: legacyPaths,
                     };
@@ -231,7 +237,7 @@ export function clearState(name, location) {
     for (const legacyPath of legacyPaths) {
         const resolvedPath = path.isAbsolute(legacyPath)
             ? legacyPath
-            : path.join(process.cwd(), legacyPath);
+            : path.join(getWorktreeRoot() || process.cwd(), legacyPath);
         try {
             if (fs.existsSync(resolvedPath)) {
                 fs.unlinkSync(resolvedPath);
@@ -348,7 +354,7 @@ export function listStates(options) {
     };
     // Check standard locations
     if (!options?.location || options.location === StateLocation.LOCAL) {
-        addStatesFromDir(LOCAL_STATE_DIR, StateLocation.LOCAL);
+        addStatesFromDir(getLocalStateDir(), StateLocation.LOCAL);
     }
     if (!options?.location || options.location === StateLocation.GLOBAL) {
         addStatesFromDir(GLOBAL_STATE_DIR, StateLocation.GLOBAL);
@@ -457,49 +463,134 @@ export function isStateStale(meta, now, maxAgeMs) {
 export function cleanupStaleStates(directory, maxAgeMs = MAX_STATE_AGE_MS) {
     const stateDir = directory
         ? path.join(directory, ".omc", "state")
-        : LOCAL_STATE_DIR;
+        : getLocalStateDir();
     if (!fs.existsSync(stateDir))
         return 0;
     let cleaned = 0;
     const now = Date.now();
-    try {
-        const files = fs.readdirSync(stateDir);
-        for (const file of files) {
-            if (!file.endsWith(".json"))
-                continue;
-            const filePath = path.join(stateDir, file);
-            try {
-                const content = fs.readFileSync(filePath, "utf-8");
-                const data = JSON.parse(content);
-                if (data.active !== true)
+    // Helper: scan JSON files in a directory and mark stale active states inactive
+    const scanDir = (dir) => {
+        try {
+            const files = fs.readdirSync(dir);
+            for (const file of files) {
+                if (!file.endsWith(".json"))
                     continue;
-                const meta = data._meta ?? {};
-                if (isStateStale(meta, now, maxAgeMs)) {
-                    console.warn(`[state-manager] cleanupStaleStates: marking "${file}" inactive (last updated ${meta.updatedAt ?? "unknown"})`);
-                    data.active = false;
-                    // Invalidate cache for this path
-                    stateCache.delete(filePath);
-                    try {
-                        atomicWriteJsonSync(filePath, data);
-                        cleaned++;
+                const filePath = path.join(dir, file);
+                try {
+                    const content = fs.readFileSync(filePath, "utf-8");
+                    const data = JSON.parse(content);
+                    if (data.active !== true)
+                        continue;
+                    const meta = data._meta ?? {};
+                    if (isStateStale(meta, now, maxAgeMs)) {
+                        console.warn(`[state-manager] cleanupStaleStates: marking "${file}" inactive (last updated ${meta.updatedAt ?? "unknown"})`);
+                        data.active = false;
+                        // Invalidate cache for this path
+                        stateCache.delete(filePath);
+                        try {
+                            atomicWriteJsonSync(filePath, data);
+                            cleaned++;
+                        }
+                        catch { /* best-effort */ }
                     }
-                    catch { /* best-effort */ }
+                }
+                catch {
+                    // Skip files that can't be read/parsed
+                }
+            }
+        }
+        catch {
+            // Directory read error
+        }
+    };
+    // Scan top-level state files (.omc/state/*.json)
+    scanDir(stateDir);
+    // Scan session directories (.omc/state/sessions/*/*.json)
+    const sessionsDir = path.join(stateDir, "sessions");
+    if (fs.existsSync(sessionsDir)) {
+        try {
+            const sessionEntries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+            for (const entry of sessionEntries) {
+                if (entry.isDirectory()) {
+                    scanDir(path.join(sessionsDir, entry.name));
+                }
+            }
+        }
+        catch {
+            // Sessions directory read error
+        }
+    }
+    return cleaned;
+}
+// File locking for atomic read-modify-write operations
+const LOCK_STALE_MS = 30_000; // locks older than 30s are considered stale
+const LOCK_TIMEOUT_MS = 5_000; // max time to wait for lock acquisition
+const LOCK_POLL_MS = 10; // busy-wait interval between lock attempts
+/**
+ * Execute a function while holding an exclusive file lock.
+ * Uses O_EXCL lockfile for cross-process mutual exclusion.
+ * Stale locks (older than LOCK_STALE_MS) are automatically broken.
+ *
+ * @throws Error if the lock cannot be acquired within LOCK_TIMEOUT_MS
+ */
+function withFileLock(filePath, fn) {
+    const lockPath = `${filePath}.lock`;
+    const lockDir = path.dirname(lockPath);
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    // Ensure directory exists for lock file
+    if (!fs.existsSync(lockDir)) {
+        fs.mkdirSync(lockDir, { recursive: true });
+    }
+    // Acquire lock via exclusive file creation
+    while (true) {
+        try {
+            const fd = fs.openSync(lockPath, "wx", 0o600);
+            fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
+            fs.closeSync(fd);
+            break;
+        }
+        catch (err) {
+            if (err.code !== "EEXIST")
+                throw err;
+            // Lock exists — check for staleness
+            try {
+                const lockStat = fs.statSync(lockPath);
+                if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+                    try {
+                        fs.unlinkSync(lockPath);
+                    }
+                    catch { /* race OK */ }
+                    continue;
                 }
             }
             catch {
-                // Skip files that can't be read/parsed
+                // Lock disappeared — retry immediately
+                continue;
             }
+            if (Date.now() >= deadline) {
+                throw new Error(`Timed out acquiring state lock: ${lockPath}`);
+            }
+            // Brief busy-wait before retry
+            const waitEnd = Date.now() + LOCK_POLL_MS;
+            while (Date.now() < waitEnd) { /* spin */ }
         }
     }
-    catch {
-        // Directory read error
+    try {
+        return fn();
     }
-    return cleaned;
+    finally {
+        try {
+            fs.unlinkSync(lockPath);
+        }
+        catch { /* best-effort */ }
+    }
 }
 /**
  * State Manager Class
  *
  * Object-oriented interface for managing a specific state.
+ *
+ * @deprecated For mode state (autopilot, ralph, ultrawork, etc.), use `writeModeState`/`readModeState` from `src/lib/mode-state-io.ts` instead. StateManager is retained for non-mode state only.
  */
 export class StateManager {
     name;
@@ -530,9 +621,15 @@ export class StateManager {
         return this.write(data).success;
     }
     update(updater) {
-        const current = this.get();
-        const updated = updater(current);
-        return this.set(updated);
+        const statePath = getStatePath(this.name, this.location);
+        return withFileLock(statePath, () => {
+            // Invalidate cache to force a fresh read under lock,
+            // preventing stale cached data from being used as the base for updates.
+            stateCache.delete(statePath);
+            const current = this.get();
+            const updated = updater(current);
+            return this.set(updated);
+        });
     }
 }
 /**

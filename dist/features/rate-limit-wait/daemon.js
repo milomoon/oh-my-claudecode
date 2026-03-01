@@ -11,7 +11,7 @@
  *
  * Reference: https://github.com/EvanOman/cc-wait
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync, statSync, appendFileSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -96,8 +96,11 @@ function writeSecureFile(filePath, content) {
     try {
         chmodSync(filePath, SECURE_FILE_MODE);
     }
-    catch {
-        // Ignore permission errors (e.g., on Windows)
+    catch (err) {
+        // chmod is not supported on Windows; warn on other platforms
+        if (process.platform !== 'win32') {
+            console.warn(`[RateLimitDaemon] Failed to set permissions on ${filePath}:`, err);
+        }
     }
 }
 /**
@@ -115,7 +118,6 @@ function rotateLogIfNeeded(logPath) {
                 unlinkSync(backupPath);
             }
             // Rename current to backup
-            const { renameSync } = require('fs');
             renameSync(logPath, backupPath);
         }
     }
@@ -243,7 +245,6 @@ function log(message, config) {
         const timestamp = new Date().toISOString();
         const logLine = `[${timestamp}] ${message}\n`;
         // Append to log file with secure permissions
-        const { appendFileSync } = require('fs');
         appendFileSync(config.logFilePath, logLine, { mode: SECURE_FILE_MODE });
     }
     catch {
@@ -268,18 +269,51 @@ function createInitialState() {
     };
 }
 /**
+ * Register cleanup handlers for the daemon process.
+ * Ensures PID file and state are cleaned up on exit signals.
+ */
+function registerDaemonCleanup(config) {
+    const cleanup = () => {
+        try {
+            removePidFile(config);
+        }
+        catch {
+            // Ignore cleanup errors
+        }
+        try {
+            const state = readDaemonState(config);
+            if (state) {
+                state.isRunning = false;
+                state.pid = null;
+                writeDaemonState(state, config);
+            }
+        }
+        catch {
+            // Ignore cleanup errors
+        }
+    };
+    process.once('SIGINT', () => { cleanup(); process.exit(0); });
+    process.once('SIGTERM', () => { cleanup(); process.exit(0); });
+    process.once('exit', cleanup);
+}
+/**
  * Main daemon polling loop
  */
 async function pollLoop(config) {
     const state = readDaemonState(config) || createInitialState();
     state.isRunning = true;
     state.pid = process.pid;
+    // Register cleanup handlers so PID/state files are cleaned up on exit
+    registerDaemonCleanup(config);
     log('Starting poll loop', config);
     while (state.isRunning) {
         try {
             state.lastPollAt = new Date();
-            // Check rate limit status
-            const rateLimitStatus = await checkRateLimitStatus();
+            // Check rate limit status with a 30s timeout to prevent poll loop stalls
+            const rateLimitStatus = await Promise.race([
+                checkRateLimitStatus(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('checkRateLimitStatus timed out after 30s')), 30_000)),
+            ]);
             const wasLimited = state.rateLimitStatus?.isLimited ?? false;
             const isNowLimited = rateLimitStatus?.isLimited ?? false;
             state.rateLimitStatus = rateLimitStatus;
@@ -365,11 +399,14 @@ export function startDaemon(config) {
         console.warn('[RateLimitDaemon] tmux not available - resume functionality will be limited');
     }
     ensureStateDir(cfg);
-    // Fork a new process for the daemon
+    // Fork a new process for the daemon using dynamic import() for ESM compatibility.
+    // The project uses "type": "module", so require() would fail with ERR_REQUIRE_ESM.
+    const modulePath = __filename.replace(/\.ts$/, '.js');
     const daemonScript = `
-    const { pollLoop } = require('${__filename.replace(/\.ts$/, '.js')}');
-    const config = ${JSON.stringify(cfg)};
-    pollLoop(config).catch(console.error);
+    import('${modulePath}').then(({ pollLoop }) => {
+      const config = ${JSON.stringify(cfg)};
+      return pollLoop(config);
+    }).catch((err) => { console.error(err); process.exit(1); });
   `;
     try {
         // Use node to run the daemon in background

@@ -6,7 +6,9 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../utils/paths.js';
+import { validateWorkingDirectory, getOmcRoot } from '../lib/worktree-paths.js';
+import { atomicWriteJsonSync } from '../lib/atomic-write.js';
 import { DEFAULT_HUD_CONFIG, PRESET_CONFIGS } from './types.js';
 import { cleanupStaleBackgroundTasks, markOrphanedTasksAsStale } from './background-cleanup.js';
 // ============================================================================
@@ -16,28 +18,28 @@ import { cleanupStaleBackgroundTasks, markOrphanedTasksAsStale } from './backgro
  * Get the HUD state file path in the project's .omc/state directory
  */
 function getLocalStateFilePath(directory) {
-    const baseDir = directory || process.cwd();
-    const omcStateDir = join(baseDir, '.omc', 'state');
+    const baseDir = validateWorkingDirectory(directory);
+    const omcStateDir = join(getOmcRoot(baseDir), 'state');
     return join(omcStateDir, 'hud-state.json');
 }
 /**
  * Get Claude Code settings.json path
  */
 function getSettingsFilePath() {
-    return join(homedir(), '.claude', 'settings.json');
+    return join(getClaudeConfigDir(), 'settings.json');
 }
 /**
  * Get the HUD config file path (legacy)
  */
 function getConfigFilePath() {
-    return join(homedir(), '.claude', '.omc', 'hud-config.json');
+    return join(getClaudeConfigDir(), '.omc', 'hud-config.json');
 }
 /**
  * Ensure the .omc/state directory exists
  */
 function ensureStateDir(directory) {
-    const baseDir = directory || process.cwd();
-    const omcStateDir = join(baseDir, '.omc', 'state');
+    const baseDir = validateWorkingDirectory(directory);
+    const omcStateDir = join(getOmcRoot(baseDir), 'state');
     if (!existsSync(omcStateDir)) {
         mkdirSync(omcStateDir, { recursive: true });
     }
@@ -61,8 +63,8 @@ export function readHudState(directory) {
         }
     }
     // Check legacy local state (.omc/hud-state.json)
-    const baseDir = directory || process.cwd();
-    const legacyStateFile = join(baseDir, '.omc', 'hud-state.json');
+    const baseDir = validateWorkingDirectory(directory);
+    const legacyStateFile = join(getOmcRoot(baseDir), 'hud-state.json');
     if (existsSync(legacyStateFile)) {
         try {
             const content = readFileSync(legacyStateFile, 'utf-8');
@@ -82,7 +84,7 @@ export function writeHudState(state, directory) {
         // Write to local .omc/state only
         ensureStateDir(directory);
         const localStateFile = getLocalStateFilePath(directory);
-        writeFileSync(localStateFile, JSON.stringify(state, null, 2));
+        atomicWriteJsonSync(localStateFile, state);
         return true;
     }
     catch {
@@ -172,6 +174,12 @@ function mergeWithDefaults(config) {
             ...config.thresholds,
         },
         staleTaskThresholdMinutes: config.staleTaskThresholdMinutes ?? DEFAULT_HUD_CONFIG.staleTaskThresholdMinutes,
+        contextLimitWarning: {
+            ...DEFAULT_HUD_CONFIG.contextLimitWarning,
+            ...config.contextLimitWarning,
+        },
+        ...(config.rateLimitsProvider ? { rateLimitsProvider: config.rateLimitsProvider } : {}),
+        ...(config.maxWidth != null ? { maxWidth: config.maxWidth } : {}),
     };
 }
 /**

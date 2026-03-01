@@ -4,10 +4,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { isOmcHook, install, InstallOptions } from '../index.js';
+import { isOmcHook, InstallOptions } from '../index.js';
 
 /**
  * Detect hook conflicts using the real isOmcHook function.
@@ -64,11 +64,26 @@ describe('isOmcHook detection', () => {
     expect(isOmcHook('/usr/local/bin/omc')).toBe(true);
   });
 
+  it('detects actual OMC hook commands from settings.json (issue #606)', () => {
+    // These are the real commands OMC installs into settings.json
+    expect(isOmcHook('node "$HOME/.claude/hooks/keyword-detector.mjs"')).toBe(true);
+    expect(isOmcHook('node "$HOME/.claude/hooks/session-start.mjs"')).toBe(true);
+    expect(isOmcHook('node "$HOME/.claude/hooks/pre-tool-use.mjs"')).toBe(true);
+    expect(isOmcHook('node "$HOME/.claude/hooks/post-tool-use.mjs"')).toBe(true);
+    expect(isOmcHook('node "$HOME/.claude/hooks/post-tool-use-failure.mjs"')).toBe(true);
+    expect(isOmcHook('node "$HOME/.claude/hooks/persistent-mode.mjs"')).toBe(true);
+  });
+
+  it('detects Windows-style OMC hook commands (issue #606)', () => {
+    expect(isOmcHook('node "%USERPROFILE%\\.claude\\hooks\\keyword-detector.mjs"')).toBe(true);
+    expect(isOmcHook('node "%USERPROFILE%\\.claude\\hooks\\pre-tool-use.mjs"')).toBe(true);
+  });
+
   it('rejects non-OMC hooks correctly', () => {
     expect(isOmcHook('eslint --fix')).toBe(false);
     expect(isOmcHook('prettier --write')).toBe(false);
     expect(isOmcHook('node custom-hook.mjs')).toBe(false);
-    expect(isOmcHook('node ~/.claude/hooks/beads-hook.mjs')).toBe(false);
+    expect(isOmcHook('node ~/other-plugin/hooks/detector.mjs')).toBe(false);
   });
 
   it('uses case-insensitive matching', () => {
@@ -115,7 +130,7 @@ describe('Safe Installer - Hook Conflict Detection', () => {
     };
     writeFileSync(TEST_SETTINGS_FILE, JSON.stringify(existingSettings, null, 2));
 
-    const options: InstallOptions = {
+    const _options: InstallOptions = {
       verbose: true,
       skipClaudeCheck: true
     };
@@ -137,7 +152,7 @@ describe('Safe Installer - Hook Conflict Detection', () => {
             hooks: [
               {
                 type: 'command',
-                command: 'node ~/.claude/hooks/omc-pre-tool-use.mjs'
+                command: 'node "$HOME/.claude/hooks/pre-tool-use.mjs"'
               }
             ]
           }
@@ -178,7 +193,7 @@ describe('Safe Installer - Hook Conflict Detection', () => {
             hooks: [
               {
                 type: 'command',
-                command: 'node ~/.claude/hooks/omc-keyword-detector.mjs'
+                command: 'node "$HOME/.claude/hooks/keyword-detector.mjs"'
               }
             ]
           }

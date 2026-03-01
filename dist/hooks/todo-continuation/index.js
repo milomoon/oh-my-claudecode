@@ -24,7 +24,8 @@ function debugLog(message, ...args) {
 }
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getOmcRoot } from '../../lib/worktree-paths.js';
+import { getClaudeConfigDir } from '../../utils/paths.js';
 /**
  * Validates that a session ID is safe to use in file paths.
  * Session IDs should be alphanumeric with optional hyphens and underscores.
@@ -76,8 +77,50 @@ export function isUserAbort(context) {
     const substringPatterns = ['user_cancel', 'user_interrupt', 'ctrl_c', 'manual_stop'];
     // Support both snake_case and camelCase field names
     const reason = (context.stop_reason ?? context.stopReason ?? '').toLowerCase();
-    return exactPatterns.some(p => reason === p) ||
-        substringPatterns.some(p => reason.includes(p));
+    const endTurnReason = (context.end_turn_reason ?? context.endTurnReason ?? '').toLowerCase();
+    const matchesAbort = (value) => exactPatterns.some(p => value === p) ||
+        substringPatterns.some(p => value.includes(p));
+    return matchesAbort(reason) || matchesAbort(endTurnReason);
+}
+/**
+ * Detect explicit /cancel command paths that should bypass stop-hook reinforcement.
+ *
+ * This is stricter than generic user-abort detection and is intended to prevent
+ * re-enforcement races when the user explicitly invokes /cancel or /cancel --force.
+ */
+export function isExplicitCancelCommand(context) {
+    if (!context)
+        return false;
+    const prompt = (context.prompt ?? '').trim();
+    if (prompt) {
+        const slashCancelPattern = /^\/(?:oh-my-claudecode:)?cancel(?:\s+--force)?\s*$/i;
+        const keywordCancelPattern = /^(?:cancelomc|stopomc)\s*$/i;
+        if (slashCancelPattern.test(prompt) || keywordCancelPattern.test(prompt)) {
+            return true;
+        }
+    }
+    const reason = (context.stop_reason ?? context.stopReason ?? '').toLowerCase();
+    const endTurnReason = (context.end_turn_reason ?? context.endTurnReason ?? '').toLowerCase();
+    const explicitReasonPatterns = [
+        /^cancel$/,
+        /^cancelled$/,
+        /^canceled$/,
+        /^user_cancel$/,
+        /^cancel_force$/,
+        /^force_cancel$/,
+    ];
+    if (explicitReasonPatterns.some((pattern) => pattern.test(reason) || pattern.test(endTurnReason))) {
+        return true;
+    }
+    const toolName = String(context.tool_name ?? context.toolName ?? '').toLowerCase();
+    const toolInput = (context.tool_input ?? context.toolInput);
+    if (toolName.includes('skill') && toolInput && typeof toolInput.skill === 'string') {
+        const skill = toolInput.skill.toLowerCase();
+        if (skill === 'oh-my-claudecode:cancel' || skill.endsWith(':cancel')) {
+            return true;
+        }
+    }
+    return false;
 }
 /**
  * Detect if stop was triggered by context-limit related reasons.
@@ -99,10 +142,35 @@ export function isContextLimitStop(context) {
     return contextPatterns.some(p => reason.includes(p) || endTurnReason.includes(p));
 }
 /**
+ * Detect if stop was triggered by rate limiting (HTTP 429 / quota exhausted).
+ * When the API is rate-limited, Claude Code stops the session.
+ * Blocking these stops causes an infinite retry loop: the persistent-mode hook
+ * injects a continuation prompt, Claude immediately hits the rate limit again,
+ * stops again, and the cycle repeats indefinitely.
+ *
+ * Fix for: https://github.com/Yeachan-Heo/oh-my-claudecode/issues/777
+ */
+export function isRateLimitStop(context) {
+    if (!context)
+        return false;
+    const reason = (context.stop_reason ?? context.stopReason ?? '').toLowerCase();
+    const endTurnReason = (context.end_turn_reason ?? context.endTurnReason ?? '').toLowerCase();
+    const rateLimitPatterns = [
+        'rate_limit', 'rate_limited', 'ratelimit',
+        'too_many_requests', '429',
+        'quota_exceeded', 'quota_limit', 'quota_exhausted',
+        'request_limit', 'api_limit',
+        // Anthropic API returns 'overloaded_error' (529) for server overload;
+        // 'capacity' covers provider-level capacity-exceeded responses
+        'overloaded', 'capacity',
+    ];
+    return rateLimitPatterns.some(p => reason.includes(p) || endTurnReason.includes(p));
+}
+/**
  * Get possible todo file locations
  */
 function getTodoFilePaths(sessionId, directory) {
-    const claudeDir = join(homedir(), '.claude');
+    const claudeDir = getClaudeConfigDir();
     const paths = [];
     // Session-specific todos
     if (sessionId) {
@@ -111,7 +179,7 @@ function getTodoFilePaths(sessionId, directory) {
     }
     // Project-specific todos
     if (directory) {
-        paths.push(join(directory, '.omc', 'todos.json'));
+        paths.push(join(getOmcRoot(directory), 'todos.json'));
         paths.push(join(directory, '.claude', 'todos.json'));
     }
     // NOTE: Global todos directory scan removed to prevent false positives.
@@ -165,7 +233,7 @@ export function getTaskDirectory(sessionId) {
     if (!isValidSessionId(sessionId)) {
         return ''; // Return empty string for invalid sessions
     }
-    return join(homedir(), '.claude', 'tasks', sessionId);
+    return join(getClaudeConfigDir(), 'tasks', sessionId);
 }
 /**
  * Validates that a parsed JSON object is a valid Task.

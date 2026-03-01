@@ -2,36 +2,49 @@
  * Configuration Loader
  *
  * Handles loading and merging configuration from multiple sources:
- * - User config: ~/.config/claude-sisyphus/config.jsonc
- * - Project config: .claude/sisyphus.jsonc
+ * - User config: ~/.config/claude-omc/config.jsonc
+ * - Project config: .claude/omc.jsonc
  * - Environment variables
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { homedir } from 'os';
 import { join, dirname } from 'path';
 import * as jsonc from 'jsonc-parser';
-import type { PluginConfig, ExternalModelsConfig, DelegationRoutingConfig } from '../shared/types.js';
+import type { PluginConfig, ExternalModelsConfig } from '../shared/types.js';
 import { getConfigDir } from '../utils/paths.js';
+import {
+  getDefaultModelHigh,
+  getDefaultModelMedium,
+  getDefaultModelLow,
+  isNonClaudeProvider,
+} from './models.js';
 
 /**
- * Default configuration
+ * Default configuration.
+ *
+ * Model IDs are resolved from environment variables (OMC_MODEL_HIGH,
+ * OMC_MODEL_MEDIUM, OMC_MODEL_LOW) with built-in fallbacks.
+ * User/project config files can further override via deepMerge.
+ *
+ * Note: env vars for external model defaults (OMC_CODEX_DEFAULT_MODEL,
+ * OMC_GEMINI_DEFAULT_MODEL) are read lazily in loadEnvConfig() to avoid
+ * capturing stale values at module load time.
  */
 export const DEFAULT_CONFIG: PluginConfig = {
   agents: {
-    omc: { model: 'claude-opus-4-6-20260205' },
-    architect: { model: 'claude-opus-4-6-20260205', enabled: true },
-    researcher: { model: 'claude-sonnet-4-5-20250929' },
-    explore: { model: 'claude-haiku-4-5-20251001' },
-    frontendEngineer: { model: 'claude-sonnet-4-5-20250929', enabled: true },
-    documentWriter: { model: 'claude-haiku-4-5-20251001', enabled: true },
-    multimodalLooker: { model: 'claude-sonnet-4-5-20250929', enabled: true },
+    omc: { model: getDefaultModelHigh() },
+    architect: { model: getDefaultModelHigh(), enabled: true },
+    researcher: { model: getDefaultModelMedium() },
+    explore: { model: getDefaultModelLow() },
+    frontendEngineer: { model: getDefaultModelMedium(), enabled: true },
+    documentWriter: { model: getDefaultModelLow(), enabled: true },
+    multimodalLooker: { model: getDefaultModelMedium(), enabled: true },
     // New agents from oh-my-opencode
-    critic: { model: 'claude-opus-4-6-20260205', enabled: true },
-    analyst: { model: 'claude-opus-4-6-20260205', enabled: true },
-    orchestratorSisyphus: { model: 'claude-sonnet-4-5-20250929', enabled: true },
-    sisyphusJunior: { model: 'claude-sonnet-4-5-20250929', enabled: true },
-    planner: { model: 'claude-opus-4-6-20260205', enabled: true }
+    critic: { model: getDefaultModelHigh(), enabled: true },
+    analyst: { model: getDefaultModelHigh(), enabled: true },
+    coordinator: { model: getDefaultModelMedium(), enabled: true },
+    executor: { model: getDefaultModelMedium(), enabled: true },
+    planner: { model: getDefaultModelHigh(), enabled: true }
   },
   features: {
     parallelExecution: true,
@@ -60,12 +73,13 @@ export const DEFAULT_CONFIG: PluginConfig = {
   routing: {
     enabled: true,
     defaultTier: 'MEDIUM',
+    forceInherit: false,
     escalationEnabled: true,
     maxEscalations: 2,
     tierModels: {
-      LOW: 'claude-haiku-4-5-20251001',
-      MEDIUM: 'claude-sonnet-4-5-20250929',
-      HIGH: 'claude-opus-4-6-20260205'
+      LOW: getDefaultModelLow(),
+      MEDIUM: getDefaultModelMedium(),
+      HIGH: getDefaultModelHigh()
     },
     agentOverrides: {
       architect: { tier: 'HIGH', reason: 'Advisory agent requires deep reasoning' },
@@ -84,10 +98,11 @@ export const DEFAULT_CONFIG: PluginConfig = {
     ]
   },
   // External models configuration (Codex, Gemini)
+  // Static defaults only — env var overrides applied in loadEnvConfig()
   externalModels: {
     defaults: {
-      codexModel: process.env.OMC_CODEX_DEFAULT_MODEL || 'gpt-5.3-codex',
-      geminiModel: process.env.OMC_GEMINI_DEFAULT_MODEL || 'gemini-3-pro-preview',
+      codexModel: 'gpt-5.3-codex',
+      geminiModel: 'gemini-3.1-pro-preview',
     },
     fallbackPolicy: {
       onModelFailure: 'provider_chain',
@@ -100,7 +115,20 @@ export const DEFAULT_CONFIG: PluginConfig = {
     enabled: false,  // Opt-in feature
     defaultProvider: 'claude',
     roles: {},
-  }
+  },
+  // Startup codebase map injection (issue #804)
+  startupCodebaseMap: {
+    enabled: true,
+    maxFiles: 200,
+    maxDepth: 4,
+  },
+  // Task size detection (issue #790): prevent over-orchestration for small tasks
+  taskSizeDetection: {
+    enabled: true,
+    smallWordLimit: 50,
+    largeWordLimit: 200,
+    suppressHeavyModesForSmallTasks: true,
+  },
 };
 
 /**
@@ -110,8 +138,8 @@ export function getConfigPaths(): { user: string; project: string } {
   const userConfigDir = getConfigDir();
 
   return {
-    user: join(userConfigDir, 'claude-sisyphus', 'config.jsonc'),
-    project: join(process.cwd(), '.claude', 'sisyphus.jsonc')
+    user: join(userConfigDir, 'claude-omc', 'config.jsonc'),
+    project: join(process.cwd(), '.claude', 'omc.jsonc')
   };
 }
 
@@ -217,6 +245,13 @@ export function loadEnvConfig(): Partial<PluginConfig> {
     config.routing = {
       ...config.routing,
       enabled: process.env.OMC_ROUTING_ENABLED === 'true'
+    };
+  }
+
+  if (process.env.OMC_ROUTING_FORCE_INHERIT !== undefined) {
+    config.routing = {
+      ...config.routing,
+      forceInherit: process.env.OMC_ROUTING_FORCE_INHERIT === 'true'
     };
   }
 
@@ -326,6 +361,22 @@ export function loadConfig(): PluginConfig {
   const envConfig = loadEnvConfig();
   config = deepMerge(config, envConfig);
 
+  // Auto-enable forceInherit for non-Claude providers (issue #1201)
+  // Only auto-enable if user hasn't explicitly set it via config or env var.
+  // When a non-Claude model is detected (CC Switch, LiteLLM, etc.), passing
+  // Claude-specific tier names (sonnet/opus/haiku) to the Agent tool causes
+  // 400 errors because the provider doesn't recognize them.
+  if (
+    config.routing?.forceInherit !== true &&
+    process.env.OMC_ROUTING_FORCE_INHERIT === undefined &&
+    isNonClaudeProvider()
+  ) {
+    config.routing = {
+      ...config.routing,
+      forceInherit: true,
+    };
+  }
+
   return config;
 }
 
@@ -390,14 +441,14 @@ export function loadContextFromFiles(files: string[]): string {
 export function generateConfigSchema(): object {
   return {
     $schema: 'http://json-schema.org/draft-07/schema#',
-    title: 'Oh-My-Claude-Sisyphus Configuration',
+    title: 'Oh-My-ClaudeCode Configuration',
     type: 'object',
     properties: {
       agents: {
         type: 'object',
         description: 'Agent model and feature configuration',
         properties: {
-          sisyphus: {
+          omc: {
             type: 'object',
             properties: {
               model: { type: 'string', description: 'Model ID for the main orchestrator' }
@@ -489,14 +540,13 @@ export function generateConfigSchema(): object {
           ultrathink: { type: 'array', items: { type: 'string' } }
         }
       },
-      swarm: {
+      routing: {
         type: 'object',
-        description: 'Swarm mode settings',
+        description: 'Intelligent model routing configuration',
         properties: {
-          defaultMaxConcurrent: { type: 'integer', default: 5, minimum: 1, maximum: 50 },
-          wavePollingInterval: { type: 'integer', default: 5000, minimum: 1000, maximum: 30000 },
-          aggressiveThreshold: { type: 'integer', default: 5 },
-          enableFileOwnership: { type: 'boolean', default: true }
+          enabled: { type: 'boolean', default: true, description: 'Enable intelligent model routing' },
+          defaultTier: { type: 'string', enum: ['LOW', 'MEDIUM', 'HIGH'], default: 'MEDIUM', description: 'Default tier when no rules match' },
+          forceInherit: { type: 'boolean', default: false, description: 'Force all agents to inherit the parent model, bypassing OMC model routing. When true, no model parameter is passed to Task calls, so agents use the user\'s Claude Code model setting. Auto-enabled when a non-Claude provider is detected (CC Switch, custom ANTHROPIC_BASE_URL, etc.).' },
         }
       },
       externalModels: {
@@ -519,7 +569,7 @@ export function generateConfigSchema(): object {
               },
               geminiModel: {
                 type: 'string',
-                default: 'gemini-3-pro-preview',
+                default: 'gemini-3.1-pro-preview',
                 description: 'Default Gemini model'
               }
             }
@@ -595,7 +645,7 @@ export function generateConfigSchema(): object {
               type: 'object',
               properties: {
                 provider: { type: 'string', enum: ['claude', 'codex', 'gemini'] },
-                tool: { type: 'string', enum: ['Task', 'ask_codex', 'ask_gemini'] },
+                tool: { type: 'string', enum: ['Task'] },
                 model: { type: 'string' },
                 agentType: { type: 'string' },
                 fallback: { type: 'array', items: { type: 'string' } }

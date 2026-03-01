@@ -54,8 +54,10 @@ describe('Session-Scoped State Isolation', () => {
             const path2 = resolveSessionStatePath('ultrawork-state', 'sid', tempDir);
             expect(path1).toBe(path2);
         });
-        it('should reject swarm mode', () => {
-            expect(() => resolveSessionStatePath('swarm', 'sid', tempDir)).toThrow('SQLite');
+        it('should resolve swarm as regular JSON path after #1131 removal', () => {
+            // swarm SQLite special-casing removed in #1131
+            const result = resolveSessionStatePath('swarm', 'sid', tempDir);
+            expect(result).toContain('swarm-state.json');
         });
     });
     describe('listSessionIds', () => {
@@ -131,6 +133,46 @@ describe('Session-Scoped State Isolation', () => {
             const pathB = join(tempDir, '.omc', 'state', 'sessions', 'session-B', 'ultrawork-state.json');
             expect(existsSync(pathB)).toBe(true);
         });
+        it('should clear session-scoped marker artifacts (ralph verification) for the target session only', () => {
+            const sessionA = 'session-A';
+            const sessionB = 'session-B';
+            createSessionState(sessionA, 'ralph', { active: true, session_id: sessionA });
+            createSessionState(sessionB, 'ralph', { active: true, session_id: sessionB });
+            const sessionADir = join(tempDir, '.omc', 'state', 'sessions', sessionA);
+            const sessionBDir = join(tempDir, '.omc', 'state', 'sessions', sessionB);
+            const markerA = join(sessionADir, 'ralph-verification-state.json');
+            const markerB = join(sessionBDir, 'ralph-verification-state.json');
+            const legacyMarker = join(tempDir, '.omc', 'state', 'ralph-verification.json');
+            writeFileSync(markerA, JSON.stringify({ pending: true }, null, 2));
+            writeFileSync(markerB, JSON.stringify({ pending: true }, null, 2));
+            mkdirSync(join(tempDir, '.omc', 'state'), { recursive: true });
+            writeFileSync(legacyMarker, JSON.stringify({ pending: true }, null, 2));
+            expect(existsSync(legacyMarker)).toBe(true);
+            clearModeState('ralph', tempDir, sessionA);
+            expect(existsSync(join(sessionADir, 'ralph-state.json'))).toBe(false);
+            expect(existsSync(markerA)).toBe(false);
+            expect(existsSync(join(sessionBDir, 'ralph-state.json'))).toBe(true);
+            expect(existsSync(markerB)).toBe(true);
+            expect(existsSync(legacyMarker)).toBe(false);
+        });
+        it('should NOT delete legacy marker file owned by a different session', () => {
+            // Regression test for issue #927:
+            // clearModeState with sessionId used to unconditionally delete the legacy
+            // marker file, bypassing the ownership check.
+            const sessionA = 'session-A';
+            const sessionB = 'session-B';
+            createSessionState(sessionA, 'ralph', { active: true, session_id: sessionA });
+            // Legacy marker is owned by session B (a different session)
+            const legacyMarkerDir = join(tempDir, '.omc', 'state');
+            mkdirSync(legacyMarkerDir, { recursive: true });
+            const legacyMarker = join(legacyMarkerDir, 'ralph-verification.json');
+            writeFileSync(legacyMarker, JSON.stringify({ pending: true, session_id: sessionB }));
+            // Clear session A's state — must NOT touch session B's marker
+            clearModeState('ralph', tempDir, sessionA);
+            expect(existsSync(legacyMarker)).toBe(true);
+            const remaining = JSON.parse(readFileSync(legacyMarker, 'utf-8'));
+            expect(remaining.session_id).toBe(sessionB);
+        });
     });
     describe('Stale session cleanup', () => {
         it('should remove empty session directories', () => {
@@ -172,14 +214,14 @@ describe('Session-Scoped State Isolation', () => {
             expect(isModeActive('ultrawork', tempDir, 'session-A')).toBe(false);
         });
         it('hasModeState with sessionId should check session path only', () => {
-            createLegacyState('ecomode', { active: true });
+            createLegacyState('ultrawork', { active: true });
             // Without sessionId, legacy file is found
-            expect(hasModeState(tempDir, 'ecomode')).toBe(true);
+            expect(hasModeState(tempDir, 'ultrawork')).toBe(true);
             // With sessionId, only session-scoped path is checked (doesn't exist)
-            expect(hasModeState(tempDir, 'ecomode', 'session-X')).toBe(false);
+            expect(hasModeState(tempDir, 'ultrawork', 'session-X')).toBe(false);
             // Create session-scoped file, now it should be found
-            createSessionState('session-X', 'ecomode', { active: true });
-            expect(hasModeState(tempDir, 'ecomode', 'session-X')).toBe(true);
+            createSessionState('session-X', 'ultrawork', { active: true });
+            expect(hasModeState(tempDir, 'ultrawork', 'session-X')).toBe(true);
         });
         it('cross-session: Session A active, Session B check returns false', () => {
             createSessionState('session-A', 'ralph', { active: true, session_id: 'session-A' });

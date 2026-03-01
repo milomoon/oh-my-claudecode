@@ -4,6 +4,52 @@
  * Parse stdin JSON from Claude Code statusline interface.
  * Based on claude-hud reference implementation.
  */
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { getWorktreeRoot } from '../lib/worktree-paths.js';
+// ============================================================================
+// Stdin Cache (for --watch mode)
+// ============================================================================
+function getStdinCachePath() {
+    const root = getWorktreeRoot() || process.cwd();
+    return join(root, '.omc', 'state', 'hud-stdin-cache.json');
+}
+/**
+ * Persist the last successful stdin read to disk.
+ * Used by --watch mode to recover data when stdin is a TTY.
+ */
+export function writeStdinCache(stdin) {
+    try {
+        const root = getWorktreeRoot() || process.cwd();
+        const cacheDir = join(root, '.omc', 'state');
+        if (!existsSync(cacheDir)) {
+            mkdirSync(cacheDir, { recursive: true });
+        }
+        writeFileSync(getStdinCachePath(), JSON.stringify(stdin));
+    }
+    catch {
+        // Best-effort; ignore failures
+    }
+}
+/**
+ * Read the last cached stdin JSON.
+ * Returns null if no cache exists or it is unreadable.
+ */
+export function readStdinCache() {
+    try {
+        const cachePath = getStdinCachePath();
+        if (!existsSync(cachePath)) {
+            return null;
+        }
+        return JSON.parse(readFileSync(cachePath, 'utf-8'));
+    }
+    catch {
+        return null;
+    }
+}
+// ============================================================================
+// Stdin Reader
+// ============================================================================
 /**
  * Read and parse stdin JSON from Claude Code.
  * Returns null if stdin is not available or invalid.
@@ -60,6 +106,6 @@ export function getContextPercent(stdin) {
  * Get model display name from stdin.
  */
 export function getModelName(stdin) {
-    return stdin.model?.display_name ?? stdin.model?.id ?? 'Unknown';
+    return stdin.model?.id ?? stdin.model?.display_name ?? 'Unknown';
 }
 //# sourceMappingURL=stdin.js.map

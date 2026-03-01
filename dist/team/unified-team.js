@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getClaudeConfigDir } from '../utils/paths.js';
 import { listMcpWorkers } from './team-registration.js';
 import { readHeartbeat, isWorkerAlive } from './heartbeat.js';
 import { getDefaultCapabilities } from './capabilities.js';
@@ -18,13 +18,13 @@ export function getTeamMembers(teamName, workingDirectory) {
     const members = [];
     // 1. Read Claude native members from config.json
     try {
-        const configPath = join(homedir(), '.claude', 'teams', teamName, 'config.json');
+        const configPath = join(getClaudeConfigDir(), 'teams', teamName, 'config.json');
         if (existsSync(configPath)) {
             const config = JSON.parse(readFileSync(configPath, 'utf-8'));
             if (Array.isArray(config.members)) {
                 for (const member of config.members) {
-                    // Skip MCP workers (they'll be handled below)
-                    if (member.backendType === 'tmux')
+                    // Skip MCP workers registered via tmux backend (they'll be handled below)
+                    if (member.backendType === 'tmux' || String(member.agentType).startsWith('tmux-'))
                         continue;
                     members.push({
                         name: member.name || 'unknown',
@@ -54,7 +54,7 @@ export function getTeamMembers(teamName, workingDirectory) {
                     status = 'quarantined';
                 else if (heartbeat.status === 'executing')
                     status = 'active';
-                else if (heartbeat.status === 'polling')
+                else if (heartbeat.status === 'ready' || heartbeat.status === 'polling')
                     status = 'idle';
                 else
                     status = heartbeat.status;
@@ -62,7 +62,17 @@ export function getTeamMembers(teamName, workingDirectory) {
             if (!alive)
                 status = 'dead';
             // Determine backend and default capabilities
-            const backend = worker.agentType === 'mcp-gemini' ? 'mcp-gemini' : 'mcp-codex';
+            let backend;
+            if (worker.agentType === 'mcp-gemini')
+                backend = 'mcp-gemini';
+            else if (worker.agentType === 'tmux-claude')
+                backend = 'tmux-claude';
+            else if (worker.agentType === 'tmux-codex')
+                backend = 'tmux-codex';
+            else if (worker.agentType === 'tmux-gemini')
+                backend = 'tmux-gemini';
+            else
+                backend = 'mcp-codex';
             const capabilities = getDefaultCapabilities(backend);
             members.push({
                 name: worker.name,

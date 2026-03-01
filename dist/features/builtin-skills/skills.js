@@ -11,36 +11,34 @@
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { parseFrontmatter, parseFrontmatterAliases } from '../../utils/frontmatter.js';
 // Get the project root directory (go up from src/features/builtin-skills/)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..', '..', '..');
 const SKILLS_DIR = join(PROJECT_ROOT, 'skills');
 /**
- * Parse YAML-like frontmatter from markdown file
+ * Claude Code native commands that must not be shadowed by OMC skill short names.
+ * Skills with these names will still load but their name will be prefixed with 'omc-'
+ * to avoid overriding built-in /review, /plan, /security-review etc.
  */
-function parseFrontmatter(content) {
-    const frontmatterRegex = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
-    const match = content.match(frontmatterRegex);
-    if (!match) {
-        return { data: {}, body: content };
-    }
-    const [, yamlContent, body] = match;
-    const data = {};
-    for (const line of yamlContent.split('\n')) {
-        const colonIndex = line.indexOf(':');
-        if (colonIndex === -1)
-            continue;
-        const key = line.slice(0, colonIndex).trim();
-        let value = line.slice(colonIndex + 1).trim();
-        // Remove surrounding quotes
-        if ((value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1);
-        }
-        data[key] = value;
-    }
-    return { data, body };
+const CC_NATIVE_COMMANDS = new Set([
+    'review',
+    'plan',
+    'security-review',
+    'init',
+    'doctor',
+    'help',
+    'config',
+    'clear',
+    'compact',
+    'memory',
+]);
+function toSafeSkillName(name) {
+    const normalized = name.trim();
+    return CC_NATIVE_COMMANDS.has(normalized.toLowerCase())
+        ? `omc-${normalized}`
+        : normalized;
 }
 /**
  * Load a single skill from a SKILL.md file
@@ -48,19 +46,40 @@ function parseFrontmatter(content) {
 function loadSkillFromFile(skillPath, skillName) {
     try {
         const content = readFileSync(skillPath, 'utf-8');
-        const { data, body } = parseFrontmatter(content);
-        return {
-            name: data.name || skillName,
-            description: data.description || '',
-            template: body.trim(),
-            // Optional fields from frontmatter
-            model: data.model,
-            agent: data.agent,
-            argumentHint: data['argument-hint'],
-        };
+        const { metadata, body } = parseFrontmatter(content);
+        const resolvedName = metadata.name || skillName;
+        const safePrimaryName = toSafeSkillName(resolvedName);
+        const safeAliases = Array.from(new Set(parseFrontmatterAliases(metadata.aliases)
+            .map((alias) => toSafeSkillName(alias))
+            .filter((alias) => alias.length > 0 && alias.toLowerCase() !== safePrimaryName.toLowerCase())));
+        const allNames = [safePrimaryName, ...safeAliases];
+        const skillEntries = [];
+        const seen = new Set();
+        for (const name of allNames) {
+            const key = name.toLowerCase();
+            if (seen.has(key))
+                continue;
+            seen.add(key);
+            skillEntries.push({
+                name,
+                aliases: name === safePrimaryName ? safeAliases : undefined,
+                aliasOf: name === safePrimaryName ? undefined : safePrimaryName,
+                deprecatedAlias: name === safePrimaryName ? undefined : true,
+                deprecationMessage: name === safePrimaryName
+                    ? undefined
+                    : `Skill alias "${name}" is deprecated. Use "${safePrimaryName}" instead.`,
+                description: metadata.description || '',
+                template: body.trim(),
+                // Optional fields from frontmatter
+                model: metadata.model,
+                agent: metadata.agent,
+                argumentHint: metadata['argument-hint'],
+            });
+        }
+        return skillEntries;
     }
     catch {
-        return null;
+        return [];
     }
 }
 /**
@@ -71,6 +90,7 @@ function loadSkillsFromDirectory() {
         return [];
     }
     const skills = [];
+    const seenNames = new Set();
     try {
         const entries = readdirSync(SKILLS_DIR, { withFileTypes: true });
         for (const entry of entries) {
@@ -78,8 +98,12 @@ function loadSkillsFromDirectory() {
                 continue;
             const skillPath = join(SKILLS_DIR, entry.name, 'SKILL.md');
             if (existsSync(skillPath)) {
-                const skill = loadSkillFromFile(skillPath, entry.name);
-                if (skill) {
+                const skillEntries = loadSkillFromFile(skillPath, entry.name);
+                for (const skill of skillEntries) {
+                    const key = skill.name.toLowerCase();
+                    if (seenNames.has(key))
+                        continue;
+                    seenNames.add(key);
                     skills.push(skill);
                 }
             }
@@ -115,8 +139,13 @@ export function getBuiltinSkill(name) {
 /**
  * List all builtin skill names
  */
-export function listBuiltinSkillNames() {
-    return createBuiltinSkills().map(s => s.name);
+export function listBuiltinSkillNames(options) {
+    const { includeAliases = false } = options ?? {};
+    const skills = createBuiltinSkills();
+    if (includeAliases) {
+        return skills.map((s) => s.name);
+    }
+    return skills.filter((s) => !s.aliasOf).map((s) => s.name);
 }
 /**
  * Clear the skills cache (useful for testing)

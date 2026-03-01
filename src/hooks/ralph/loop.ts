@@ -13,11 +13,9 @@
 import {
   existsSync,
   readFileSync,
-  writeFileSync,
-  mkdirSync,
-  unlinkSync,
 } from "fs";
 import { join } from "path";
+import { writeModeState, readModeState, clearModeStateFile } from '../../lib/mode-state-io.js';
 import {
   readPrd,
   getPrdStatus,
@@ -37,7 +35,9 @@ import {
   readUltraworkState as readUltraworkStateFromModule,
   writeUltraworkState as writeUltraworkStateFromModule,
 } from "../ultrawork/index.js";
-import { resolveSessionStatePath, ensureSessionStateDir } from "../../lib/worktree-paths.js";
+import { resolveSessionStatePath, getOmcRoot } from "../../lib/worktree-paths.js";
+import { readTeamPipelineState } from "../team-pipeline/state.js";
+import type { TeamPipelinePhase } from "../team-pipeline/types.js";
 
 // Forward declaration to avoid circular import - check ultraqa state file directly
 export function isUltraQAActive(directory: string, sessionId?: string): boolean {
@@ -57,7 +57,7 @@ export function isUltraQAActive(directory: string, sessionId?: string): boolean 
   }
 
   // No sessionId: legacy path (backward compat)
-  const omcDir = join(directory, ".omc");
+  const omcDir = getOmcRoot(directory);
   const stateFile = join(omcDir, "state", "ultraqa-state.json");
   if (!existsSync(stateFile)) {
     return false;
@@ -103,7 +103,7 @@ export interface RalphLoopOptions {
 
 export interface RalphLoopHook {
   startLoop: (
-    sessionId: string,
+    sessionId: string | undefined,
     prompt: string,
     options?: RalphLoopOptions,
   ) => boolean;
@@ -114,66 +114,17 @@ export interface RalphLoopHook {
 const DEFAULT_MAX_ITERATIONS = 10;
 
 /**
- * Get the state file path for Ralph Loop
- */
-function getStateFilePath(directory: string, sessionId?: string): string {
-  if (sessionId) {
-    return resolveSessionStatePath('ralph', sessionId, directory);
-  }
-  const omcDir = join(directory, ".omc");
-  return join(omcDir, "state", "ralph-state.json");
-}
-
-/**
- * Ensure the .omc directory exists
- */
-function ensureStateDir(directory: string, sessionId?: string): void {
-  if (sessionId) {
-    ensureSessionStateDir(sessionId, directory);
-    return;
-  }
-  const stateDir = join(directory, ".omc", "state");
-  if (!existsSync(stateDir)) {
-    mkdirSync(stateDir, { recursive: true });
-  }
-}
-
-/**
  * Read Ralph Loop state from disk
  */
 export function readRalphState(directory: string, sessionId?: string): RalphLoopState | null {
-  // When sessionId is provided, ONLY check session-scoped path — no legacy fallback
-  if (sessionId) {
-    const sessionFile = getStateFilePath(directory, sessionId);
-    if (!existsSync(sessionFile)) {
-      return null;
-    }
-    try {
-      const content = readFileSync(sessionFile, "utf-8");
-      const state: RalphLoopState = JSON.parse(content);
-      // Validate session identity
-      if (state.session_id && state.session_id !== sessionId) {
-        return null;
-      }
-      return state;
-    } catch {
-      return null; // NO legacy fallback
-    }
-  }
+  const state = readModeState<RalphLoopState>('ralph', directory, sessionId);
 
-  // No sessionId: legacy path (backward compat)
-  const stateFile = getStateFilePath(directory);
-  if (!existsSync(stateFile)) {
+  // Validate session identity
+  if (state && sessionId && state.session_id && state.session_id !== sessionId) {
     return null;
   }
 
-  try {
-    const content = readFileSync(stateFile, "utf-8");
-    return JSON.parse(content);
-  } catch (error) {
-    console.error("[ralph] Failed to read state file:", error);
-    return null;
-  }
+  return state;
 }
 
 /**
@@ -184,32 +135,14 @@ export function writeRalphState(
   state: RalphLoopState,
   sessionId?: string
 ): boolean {
-  try {
-    ensureStateDir(directory, sessionId);
-    const stateFile = getStateFilePath(directory, sessionId);
-    writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
-    return true;
-  } catch {
-    return false;
-  }
+  return writeModeState('ralph', state as unknown as Record<string, unknown>, directory, sessionId);
 }
 
 /**
- * Clear Ralph Loop state
+ * Clear Ralph Loop state (includes ghost-legacy cleanup)
  */
 export function clearRalphState(directory: string, sessionId?: string): boolean {
-  const stateFile = getStateFilePath(directory, sessionId);
-
-  if (!existsSync(stateFile)) {
-    return true;
-  }
-
-  try {
-    unlinkSync(stateFile);
-    return true;
-  } catch {
-    return false;
-  }
+  return clearModeStateFile('ralph', directory, sessionId);
 }
 
 /**
@@ -223,28 +156,7 @@ export function clearLinkedUltraworkState(directory: string, sessionId?: string)
     return true;
   }
 
-  // Try session-scoped path first
-  if (sessionId) {
-    const sessionFile = resolveSessionStatePath('ultrawork', sessionId, directory);
-    if (existsSync(sessionFile)) {
-      try {
-        unlinkSync(sessionFile);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-  }
-
-  // Fallback to legacy path
-  const omcDir = join(directory, ".omc");
-  const stateFile = join(omcDir, "state", "ultrawork-state.json");
-  try {
-    unlinkSync(stateFile);
-    return true;
-  } catch {
-    return false;
-  }
+  return clearModeStateFile('ultrawork', directory, sessionId);
 }
 
 /**
@@ -274,7 +186,7 @@ export function incrementRalphIteration(
  */
 export function createRalphLoopHook(directory: string): RalphLoopHook {
   const startLoop = (
-    sessionId: string,
+    sessionId: string | undefined,
     prompt: string,
     options?: RalphLoopOptions,
   ): boolean => {
@@ -471,6 +383,37 @@ export function recordStoryProgress(
  */
 export function recordPattern(directory: string, pattern: string): boolean {
   return addPattern(directory, pattern);
+}
+
+/**
+ * Check if an active team pipeline should influence ralph loop continuation.
+ * Returns:
+ *  - 'continue' if team is in a phase where ralph should keep looping (team-verify, team-fix, team-exec)
+ *  - 'complete' if team reached a terminal state (complete, failed)
+ *  - null if no team state is active (ralph operates independently)
+ */
+export function getTeamPhaseDirective(
+  directory: string,
+  sessionId?: string,
+): 'continue' | 'complete' | null {
+  const teamState = readTeamPipelineState(directory, sessionId);
+  if (!teamState || !teamState.active) {
+    // Check terminal states even when active=false
+    if (teamState) {
+      const terminalPhases: TeamPipelinePhase[] = ['complete', 'failed'];
+      if (terminalPhases.includes(teamState.phase)) {
+        return 'complete';
+      }
+    }
+    return null;
+  }
+
+  const continuePhases: TeamPipelinePhase[] = ['team-verify', 'team-fix', 'team-exec', 'team-plan', 'team-prd'];
+  if (continuePhases.includes(teamState.phase)) {
+    return 'continue';
+  }
+
+  return null;
 }
 
 /**

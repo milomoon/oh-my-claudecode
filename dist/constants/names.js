@@ -9,10 +9,14 @@ export const MODES = {
     AUTOPILOT: 'autopilot',
     RALPH: 'ralph',
     ULTRAWORK: 'ultrawork',
-    ULTRAPILOT: 'ultrapilot',
     ULTRAQA: 'ultraqa',
-    ECOMODE: 'ecomode',
     TEAM: 'team',
+    RALPLAN: 'ralplan',
+};
+// Deprecated mode names (removed in #1131)
+export const DEPRECATED_MODES = {
+    ULTRAPILOT: 'ultrapilot',
+    SWARM: 'swarm',
     PIPELINE: 'pipeline',
 };
 // Tool categories
@@ -25,8 +29,10 @@ export const TOOL_CATEGORIES = {
     MEMORY: 'memory',
     TRACE: 'trace',
     SKILLS: 'skills',
+    INTEROP: 'interop',
     CODEX: 'codex',
     GEMINI: 'gemini',
+    SHARED_MEMORY: 'shared-memory',
 };
 // Hook event names
 export const HOOK_EVENTS = {

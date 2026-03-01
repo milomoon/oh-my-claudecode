@@ -2,16 +2,17 @@
  * Conflict diagnostic command
  * Scans for and reports plugin coexistence issues.
  */
-import { readFileSync, existsSync } from 'fs';
-import { homedir } from 'os';
+import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
+import { getClaudeConfigDir } from '../../utils/paths.js';
+import { isOmcHook } from '../../installer/index.js';
 import { colors } from '../utils/formatting.js';
+import { listBuiltinSkillNames } from '../../features/builtin-skills/skills.js';
 /**
- * Check for hook conflicts in ~/.claude/settings.json
+ * Collect hook entries from a single settings.json file.
  */
-export function checkHookConflicts() {
+function collectHooksFromSettings(settingsPath) {
     const conflicts = [];
-    const settingsPath = join(homedir(), '.claude', 'settings.json');
     if (!existsSync(settingsPath)) {
         return conflicts;
     }
@@ -35,36 +36,56 @@ export function checkHookConflicts() {
                         continue;
                     for (const hook of group.hooks) {
                         if (hook.type === 'command' && hook.command) {
-                            const lowerCmd = hook.command.toLowerCase();
-                            const isOmc = lowerCmd.includes('omc') || lowerCmd.includes('oh-my-claudecode');
-                            conflicts.push({ event, command: hook.command, isOmc });
+                            conflicts.push({ event, command: hook.command, isOmc: isOmcHook(hook.command) });
                         }
                     }
                 }
             }
         }
     }
-    catch (error) {
+    catch (_error) {
         // Ignore parse errors, will be reported separately
     }
     return conflicts;
 }
 /**
- * Check CLAUDE.md for OMC markers and user content
+ * Check for hook conflicts in both profile-level (~/.claude/settings.json)
+ * and project-level (./.claude/settings.json).
+ *
+ * Claude Code settings precedence: project > profile > defaults.
+ * We check both levels so the diagnostic is complete.
  */
-export function checkClaudeMdStatus() {
-    const claudeMdPath = join(homedir(), '.claude', 'CLAUDE.md');
-    if (!existsSync(claudeMdPath)) {
-        return null;
+export function checkHookConflicts() {
+    const profileSettingsPath = join(getClaudeConfigDir(), 'settings.json');
+    const projectSettingsPath = join(process.cwd(), '.claude', 'settings.json');
+    const profileHooks = collectHooksFromSettings(profileSettingsPath);
+    const projectHooks = collectHooksFromSettings(projectSettingsPath);
+    // Deduplicate by event+command (same hook in both levels should appear once)
+    const seen = new Set();
+    const merged = [];
+    for (const hook of [...projectHooks, ...profileHooks]) {
+        const key = `${hook.event}::${hook.command}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(hook);
+        }
     }
+    return merged;
+}
+/**
+ * Check a single file for OMC markers.
+ * Returns { hasMarkers, hasUserContent } or null on error.
+ */
+function checkFileForOmcMarkers(filePath) {
+    if (!existsSync(filePath))
+        return null;
     try {
-        const content = readFileSync(claudeMdPath, 'utf-8');
+        const content = readFileSync(filePath, 'utf-8');
         const hasStartMarker = content.includes('<!-- OMC:START -->');
         const hasEndMarker = content.includes('<!-- OMC:END -->');
         const hasMarkers = hasStartMarker && hasEndMarker;
         let hasUserContent = false;
         if (hasMarkers) {
-            // Extract content outside markers
             const startIdx = content.indexOf('<!-- OMC:START -->');
             const endIdx = content.indexOf('<!-- OMC:END -->');
             const beforeMarker = content.substring(0, startIdx).trim();
@@ -72,16 +93,85 @@ export function checkClaudeMdStatus() {
             hasUserContent = beforeMarker.length > 0 || afterMarker.length > 0;
         }
         else {
-            // No markers means all content is user content
             hasUserContent = content.trim().length > 0;
         }
+        return { hasMarkers, hasUserContent };
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Find companion CLAUDE-*.md files in the config directory.
+ * These are files like CLAUDE-omc.md that users create as part of a
+ * file-split pattern to keep OMC config separate from their own CLAUDE.md.
+ */
+function findCompanionClaudeMdFiles(configDir) {
+    try {
+        return readdirSync(configDir)
+            .filter(f => /^CLAUDE-.+\.md$/i.test(f))
+            .map(f => join(configDir, f));
+    }
+    catch {
+        return [];
+    }
+}
+/**
+ * Check CLAUDE.md for OMC markers and user content.
+ * Also checks companion files (CLAUDE-omc.md, etc.) for the file-split pattern
+ * where users keep OMC config in a separate file.
+ */
+export function checkClaudeMdStatus() {
+    const configDir = getClaudeConfigDir();
+    const claudeMdPath = join(configDir, 'CLAUDE.md');
+    if (!existsSync(claudeMdPath)) {
+        return null;
+    }
+    try {
+        // Check the main CLAUDE.md first
+        const mainResult = checkFileForOmcMarkers(claudeMdPath);
+        if (!mainResult)
+            return null;
+        if (mainResult.hasMarkers) {
+            return {
+                hasMarkers: true,
+                hasUserContent: mainResult.hasUserContent,
+                path: claudeMdPath
+            };
+        }
+        // No markers in main file - check companion files (file-split pattern)
+        const companions = findCompanionClaudeMdFiles(configDir);
+        for (const companionPath of companions) {
+            const companionResult = checkFileForOmcMarkers(companionPath);
+            if (companionResult?.hasMarkers) {
+                return {
+                    hasMarkers: true,
+                    hasUserContent: mainResult.hasUserContent,
+                    path: claudeMdPath,
+                    companionFile: companionPath
+                };
+            }
+        }
+        // No markers in main or companions - check if CLAUDE.md references a companion
+        const content = readFileSync(claudeMdPath, 'utf-8');
+        const companionRefPattern = /CLAUDE-[^\s)]+\.md/i;
+        const refMatch = content.match(companionRefPattern);
+        if (refMatch) {
+            // CLAUDE.md references a companion file but it doesn't have markers yet
+            return {
+                hasMarkers: false,
+                hasUserContent: mainResult.hasUserContent,
+                path: claudeMdPath,
+                companionFile: join(configDir, refMatch[0])
+            };
+        }
         return {
-            hasMarkers,
-            hasUserContent,
+            hasMarkers: false,
+            hasUserContent: mainResult.hasUserContent,
             path: claudeMdPath
         };
     }
-    catch (error) {
+    catch (_error) {
         return null;
     }
 }
@@ -97,11 +187,37 @@ export function checkEnvFlags() {
     return { disableOmc, skipHooks };
 }
 /**
+ * Check for legacy curl-installed skills that collide with plugin skill names.
+ * Only flags skills whose names match actual installed plugin skills, avoiding
+ * false positives for user's custom skills.
+ */
+export function checkLegacySkills() {
+    const legacySkillsDir = join(getClaudeConfigDir(), 'skills');
+    if (!existsSync(legacySkillsDir))
+        return [];
+    const collisions = [];
+    try {
+        const pluginSkillNames = new Set(listBuiltinSkillNames({ includeAliases: true }).map(n => n.toLowerCase()));
+        const entries = readdirSync(legacySkillsDir);
+        for (const entry of entries) {
+            // Match .md files or directories whose name collides with a plugin skill
+            const baseName = entry.replace(/\.md$/i, '').toLowerCase();
+            if (pluginSkillNames.has(baseName)) {
+                collisions.push({ name: baseName, path: join(legacySkillsDir, entry) });
+            }
+        }
+    }
+    catch {
+        // Ignore read errors
+    }
+    return collisions;
+}
+/**
  * Check for unknown fields in config files
  */
 export function checkConfigIssues() {
     const unknownFields = [];
-    const configPath = join(homedir(), '.claude', '.omc-config.json');
+    const configPath = join(getClaudeConfigDir(), '.omc-config.json');
     if (!existsSync(configPath)) {
         return { unknownFields };
     }
@@ -116,7 +232,7 @@ export function checkConfigIssues() {
             'permissions',
             'magicKeywords',
             'routing',
-            // SisyphusConfig fields (from auto-update.ts / omc-setup)
+            // OMCConfig fields (from auto-update.ts / omc-setup)
             'silentAutoUpdate',
             'configuredAt',
             'configVersion',
@@ -124,9 +240,12 @@ export function checkConfigIssues() {
             'taskToolConfig',
             'defaultExecutionMode',
             'bashHistory',
-            'ecomode',
+            'agentTiers',
             'setupCompleted',
             'setupVersion',
+            'stopHookCallbacks',
+            'notifications',
+            'autoUpgradePrompt',
         ]);
         for (const field of Object.keys(config)) {
             if (!knownFields.has(field)) {
@@ -134,7 +253,7 @@ export function checkConfigIssues() {
             }
         }
     }
-    catch (error) {
+    catch (_error) {
         // Ignore parse errors
     }
     return { unknownFields };
@@ -145,10 +264,12 @@ export function checkConfigIssues() {
 export function runConflictCheck() {
     const hookConflicts = checkHookConflicts();
     const claudeMdStatus = checkClaudeMdStatus();
+    const legacySkills = checkLegacySkills();
     const envFlags = checkEnvFlags();
     const configIssues = checkConfigIssues();
     // Determine if there are actual conflicts
     const hasConflicts = hookConflicts.some(h => !h.isOmc) || // Non-OMC hooks present
+        legacySkills.length > 0 || // Legacy skills colliding with plugin
         envFlags.disableOmc || // OMC is disabled
         envFlags.skipHooks.length > 0 || // Hooks are being skipped
         configIssues.unknownFields.length > 0; // Unknown config fields
@@ -156,6 +277,7 @@ export function runConflictCheck() {
     return {
         hookConflicts,
         claudeMdStatus,
+        legacySkills,
         envFlags,
         configIssues,
         hasConflicts
@@ -195,7 +317,13 @@ export function formatReport(report, json) {
         lines.push(colors.bold('📄 CLAUDE.md Status'));
         lines.push('');
         if (report.claudeMdStatus.hasMarkers) {
-            lines.push(`  ${colors.green('✓')} OMC markers present`);
+            if (report.claudeMdStatus.companionFile) {
+                lines.push(`  ${colors.green('✓')} OMC markers found in companion file`);
+                lines.push(`    ${colors.gray(`Companion: ${report.claudeMdStatus.companionFile}`)}`);
+            }
+            else {
+                lines.push(`  ${colors.green('✓')} OMC markers present`);
+            }
             if (report.claudeMdStatus.hasUserContent) {
                 lines.push(`  ${colors.green('✓')} User content preserved outside markers`);
             }
@@ -231,6 +359,17 @@ export function formatReport(report, json) {
         lines.push(`  ${colors.green('✓')} No hooks are being skipped`);
     }
     lines.push('');
+    // Legacy skills
+    if (report.legacySkills.length > 0) {
+        lines.push(colors.bold('📦 Legacy Skills'));
+        lines.push('');
+        lines.push(`  ${colors.yellow('⚠')} Skills colliding with plugin skill names:`);
+        for (const skill of report.legacySkills) {
+            lines.push(`    - ${skill.name} ${colors.gray(`(${skill.path})`)}`);
+        }
+        lines.push(`    ${colors.gray('These legacy files shadow plugin skills. Remove them or rename to avoid conflicts.')}`);
+        lines.push('');
+    }
     // Config issues
     if (report.configIssues.unknownFields.length > 0) {
         lines.push(colors.bold('⚙️  Configuration Issues'));

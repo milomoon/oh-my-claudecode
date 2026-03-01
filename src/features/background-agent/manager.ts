@@ -1,16 +1,16 @@
 /**
  * Background Agent Manager
  *
- * Manages background tasks for the Sisyphus system.
+ * Manages background tasks for the OMC system.
  * This is a simplified version that tracks tasks launched via Claude Code's
  * native Task tool with run_in_background: true.
  *
  * Adapted from oh-my-opencode's background-agent feature.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../../utils/paths.js';
 import { ConcurrencyManager } from './concurrency.js';
 import type {
   BackgroundTask,
@@ -26,10 +26,10 @@ import type {
 const DEFAULT_TASK_TTL_MS = 30 * 60 * 1000;
 
 /** Storage directory for task state */
-const BACKGROUND_TASKS_DIR = join(homedir(), '.claude', '.omc', 'background-tasks');
+const BACKGROUND_TASKS_DIR = join(getClaudeConfigDir(), '.omc', 'background-tasks');
 
 /**
- * Manages background tasks for the Sisyphus system.
+ * Manages background tasks for the OMC system.
  */
 export class BackgroundManager {
   private tasks: Map<string, BackgroundTask> = new Map();
@@ -96,7 +96,6 @@ export class BackgroundManager {
     if (!existsSync(BACKGROUND_TASKS_DIR)) return;
 
     try {
-      const { readdirSync } = require('fs');
       const files = readdirSync(BACKGROUND_TASKS_DIR) as string[];
 
       for (const file of files) {

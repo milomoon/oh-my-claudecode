@@ -6,7 +6,7 @@
  * processPreToolUse integration in bridge.ts
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   processOrchestratorPreTool,
   isAllowedPath,
@@ -565,7 +565,7 @@ describe('delegation-enforcement-levels', () => {
         expect.stringContaining('task-'),
         'Test task',
         'executor',
-        '/tmp/test-project'
+        process.cwd()
       );
     });
   });
