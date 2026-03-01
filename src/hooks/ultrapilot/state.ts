@@ -9,7 +9,6 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { join } from 'path';
 import type { UltrapilotState, UltrapilotConfig, WorkerState, FileOwnership } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
-import { canStartMode } from '../mode-registry/index.js';
 import { resolveSessionStatePath, ensureSessionStateDir, getOmcRoot } from '../../lib/worktree-paths.js';
 import { writeModeState, readModeState } from '../../lib/mode-state-io.js';
 

@@ -31,7 +31,7 @@ vi.mock('../config/loader.js', async (importOriginal) => {
   };
 });
 
-import { loadConfig, loadEnvConfig, DEFAULT_CONFIG } from '../config/loader.js';
+import { loadConfig, DEFAULT_CONFIG } from '../config/loader.js';
 
 const mockedLoadConfig = vi.mocked(loadConfig);
 

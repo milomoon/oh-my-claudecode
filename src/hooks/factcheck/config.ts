@@ -6,7 +6,6 @@
  */
 
 import { homedir } from 'os';
-import { resolve } from 'path';
 import { loadConfig } from '../../config/loader.js';
 import type { GuardsConfig, FactcheckPolicy, SentinelPolicy } from './types.js';
 

@@ -728,7 +728,7 @@ function paneTailContainsLiteralLine(captured: string, text: string): boolean {
 
 async function paneInCopyMode(
   paneId: string,
-  execFileAsync: (cmd: string, args: string[]) => Promise<{ stdout: string }>
+  _execFileAsync: (cmd: string, args: string[]) => Promise<{ stdout: string }>
 ): Promise<boolean> {
   try {
     const result = await tmuxAsync(['display-message', '-t', paneId, '-p', '#{pane_in_mode}']);
@@ -926,7 +926,7 @@ export async function isWorkerAlive(paneId: string): Promise<boolean> {
   try {
     const { execFile } = await import('child_process');
     const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
+    const _execFileAsync = promisify(execFile);
     const result = await tmuxAsync([
       'display-message', '-t', paneId, '-p', '#{pane_dead}'
     ]);

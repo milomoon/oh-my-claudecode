@@ -508,9 +508,7 @@ import {
   stateListActiveTool,
   stateGetStatusTool,
 } from '../tools/state-tools.js';
-import { atomicWriteJsonSync } from '../lib/atomic-write.js';
 import {
-  resolveStatePath,
   resolveSessionStatePath,
 } from '../lib/worktree-paths.js';
 

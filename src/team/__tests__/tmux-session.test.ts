@@ -9,7 +9,6 @@ import {
   shouldAttemptAdaptiveRetry,
   getDefaultShell,
   buildWorkerStartCommand,
-  isUnixLikeOnWindows,
   shouldLoadShellRc,
   validateCliBinaryPath,
 } from '../tmux-session.js';

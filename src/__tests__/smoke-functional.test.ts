@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -25,7 +25,7 @@ vi.mock('../lib/worktree-paths.js', async (importOriginal) => {
 });
 
 import {
-  writeEntry, readEntry, listEntries, deleteEntry,
+  writeEntry, readEntry, listEntries,
   cleanupExpired, listNamespaces, isSharedMemoryEnabled,
 } from '../lib/shared-memory.js';
 
@@ -140,7 +140,7 @@ describe('SMOKE: Shared Memory (issue #1137)', () => {
 // 2. MODEL ROUTING — forceInherit (issue #1135)
 // ============================================================================
 
-import { routeTask, getModelForTask, analyzeTaskComplexity, quickTierForAgent } from '../features/model-routing/router.js';
+import { routeTask, analyzeTaskComplexity, quickTierForAgent } from '../features/model-routing/router.js';
 
 describe('SMOKE: Model Routing — forceInherit (issue #1135)', () => {
   const BASE_CONFIG = {
@@ -213,7 +213,7 @@ import {
   buildPipelineTracking, initPipeline, advanceStage,
   getPipelineStatus, formatPipelineHUD, hasPipelineTracking,
 } from '../hooks/autopilot/pipeline.js';
-import { DEFAULT_PIPELINE_CONFIG, STAGE_ORDER } from '../hooks/autopilot/pipeline-types.js';
+import { DEFAULT_PIPELINE_CONFIG } from '../hooks/autopilot/pipeline-types.js';
 
 describe('SMOKE: Pipeline Orchestrator (issue #1132)', () => {
   let testDir: string;
@@ -297,7 +297,7 @@ describe('SMOKE: Pipeline Orchestrator (issue #1132)', () => {
 // ============================================================================
 
 import {
-  omxStatusToOmc, omcStatusToOmx,
+  omxStatusToOmc,
   mapOmxRoleToCliAgent, omxTaskToTaskFile, taskFileToOmxTask,
   teamConfigToOmx, omxMailboxToInboxMarkdown, isOmxWorker,
 } from '../interop/worker-adapter.js';

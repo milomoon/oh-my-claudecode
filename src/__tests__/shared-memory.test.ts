@@ -150,7 +150,7 @@ describe('Shared Memory', () => {
     });
 
     it('should return non-expired entries normally', () => {
-      const entry = writeEntry('ns', 'fresh', 'data', 7200);
+      const _entry = writeEntry('ns', 'fresh', 'data', 7200);
       const read = readEntry('ns', 'fresh');
       expect(read).not.toBeNull();
       expect(read!.value).toBe('data');

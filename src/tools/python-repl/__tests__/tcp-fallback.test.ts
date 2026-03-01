@@ -4,7 +4,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 
-import { getBridgePortPath, getBridgeSocketPath, getSessionDir, getRuntimeDir } from '../paths.js';
+import { getBridgePortPath, getBridgeSocketPath, getSessionDir } from '../paths.js';
 import { sendSocketRequest } from '../socket-client.js';
 
 // =============================================================================

@@ -29,7 +29,6 @@ import {
   initAutopilot,
 } from './state.js';
 import type { AutopilotState, AutopilotConfig } from './types.js';
-import { canStartMode } from '../mode-registry/index.js';
 
 // ============================================================================
 // CONFIGURATION
@@ -83,7 +82,7 @@ export function getDeprecationWarning(mode: string): string | null {
  * Creates stage entries for all stages, marking skipped stages as 'skipped'.
  */
 export function buildPipelineTracking(config: PipelineConfig): PipelineTracking {
-  const adapters = getActiveAdapters(config);
+  const _adapters = getActiveAdapters(config);
   const stages: PipelineStageState[] = STAGE_ORDER.map(stageId => {
     const adapter = getAdapterById(stageId);
     const isActive = adapter && !adapter.shouldSkip(config);

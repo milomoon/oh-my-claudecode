@@ -20,7 +20,7 @@ import type { TaskFile, DoneSignal, OutboxMessage } from '../team/types.js';
 import type { CliAgentType } from '../team/model-contract.js';
 import type { TeamConfig } from '../team/runtime.js';
 import {
-  readOmxTeamConfig, readOmxTask, listOmxTasks,
+  readOmxTask,
   appendOmxTeamEvent,
   type OmxTeamConfig, type OmxTeamTask, type OmxTeamMailboxMessage,
 } from './omx-team-state.js';
@@ -28,7 +28,7 @@ import type {
   AdapterContext, StatusAnnotation, WorkerInteropConfig,
 } from './adapter-types.js';
 import {
-  generateWorkerOverlay, composeInitialInbox, ensureWorkerStateDir,
+  composeInitialInbox, ensureWorkerStateDir,
   writeWorkerOverlay,
 } from '../team/worker-bootstrap.js';
 

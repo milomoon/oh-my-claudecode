@@ -31,7 +31,7 @@ describe('resolveShellPath', () => {
   });
 
   it('_resetShellPathCache allows re-resolution', () => {
-    const first = shellPathModule.resolveShellPath();
+    const _first = shellPathModule.resolveShellPath();
     shellPathModule._resetShellPathCache();
     const second = shellPathModule.resolveShellPath();
     // Both should be valid paths (may be same value but re-resolved)

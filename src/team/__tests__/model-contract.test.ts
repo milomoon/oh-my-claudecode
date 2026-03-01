@@ -17,7 +17,7 @@ vi.mock('child_process', async (importOriginal) => {
 });
 
 import { spawnSync } from 'child_process';
-import { getContract, buildLaunchArgs, buildWorkerArgv, buildWorkerCommand, getWorkerEnv, parseCliOutput, isPromptModeAgent, getPromptModeArgs, isCliAvailable, clearResolvedPathCache } from '../model-contract.js';
+import { getContract, buildLaunchArgs, buildWorkerArgv, getWorkerEnv, parseCliOutput, isPromptModeAgent, getPromptModeArgs, isCliAvailable, clearResolvedPathCache } from '../model-contract.js';
 
 describe('model-contract', () => {
   beforeEach(() => {

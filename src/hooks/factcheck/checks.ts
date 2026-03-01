@@ -8,7 +8,6 @@
 import { existsSync } from 'fs';
 import { resolve } from 'path';
 import type {
-  FactcheckClaims,
   FactcheckPolicy,
   Mismatch,
   FactcheckMode,

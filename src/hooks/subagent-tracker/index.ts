@@ -15,7 +15,6 @@ import {
   writeFileSync,
   mkdirSync,
   unlinkSync,
-  statSync,
 } from "fs";
 import { join } from "path";
 import { getOmcRoot } from '../../lib/worktree-paths.js';

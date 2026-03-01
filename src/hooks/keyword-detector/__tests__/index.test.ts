@@ -12,8 +12,6 @@ import {
   applyRalplanGate,
   detectDeprecatedKeywords,
   NON_LATIN_SCRIPT_PATTERN,
-  type KeywordType,
-  type DetectedKeyword,
 } from '../index.js';
 
 // Mock isTeamEnabled

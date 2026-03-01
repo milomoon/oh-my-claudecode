@@ -11,7 +11,6 @@ import {
   readPipelineTracking,
   initPipeline,
   getCurrentStageAdapter,
-  getNextStageAdapter,
   advanceStage,
   failCurrentStage,
   incrementStageIteration,
@@ -27,7 +26,7 @@ import {
   STAGE_ORDER,
   DEPRECATED_MODE_ALIASES,
 } from '../pipeline-types.js';
-import type { PipelineConfig, PipelineTracking } from '../pipeline-types.js';
+import type { PipelineConfig } from '../pipeline-types.js';
 
 import {
   ralplanAdapter,

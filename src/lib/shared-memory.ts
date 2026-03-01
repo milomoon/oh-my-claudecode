@@ -19,7 +19,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, renameSync } from 'fs';
-import { join, basename } from 'path';
+import { join } from 'path';
 import { getOmcRoot } from './worktree-paths.js';
 
 // ---------------------------------------------------------------------------

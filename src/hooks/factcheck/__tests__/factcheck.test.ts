@@ -5,11 +5,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { runChecks } from '../index.js';
-import type { FactcheckPolicy, FactcheckMode } from '../types.js';
+import type { FactcheckPolicy } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

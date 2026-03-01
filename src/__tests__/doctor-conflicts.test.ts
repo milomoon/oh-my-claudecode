@@ -31,7 +31,7 @@ vi.mock('../features/builtin-skills/skills.js', () => ({
 }));
 
 // Import after mock setup
-import { checkHookConflicts, checkClaudeMdStatus, checkLegacySkills, runConflictCheck, type ConflictReport } from '../cli/commands/doctor-conflicts.js';
+import { checkHookConflicts, checkClaudeMdStatus, checkLegacySkills, runConflictCheck } from '../cli/commands/doctor-conflicts.js';
 
 describe('doctor-conflicts: hook ownership classification', () => {
   let cwdSpy: ReturnType<typeof vi.spyOn>;

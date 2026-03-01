@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -16,8 +16,8 @@ import {
   setPriorityContext,
   readNotepad,
   getNotepadPath,
-  WORKING_MEMORY_HEADER,
-  MANUAL_HEADER,
+  WORKING_MEMORY_HEADER as _WORKING_MEMORY_HEADER,
+  MANUAL_HEADER as _MANUAL_HEADER,
 } from '../hooks/notepad/index.js';
 import {
   loadProjectMemory,

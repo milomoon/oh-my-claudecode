@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -40,13 +40,13 @@ vi.mock('../hooks/mode-registry/index.js', () => ({
 
 import {
   writeEntry, readEntry, listEntries, deleteEntry,
-  cleanupExpired, listNamespaces, isSharedMemoryEnabled,
+  cleanupExpired, listNamespaces,
 } from '../lib/shared-memory.js';
 
 import {
   resolvePipelineConfig, getDeprecationWarning,
   buildPipelineTracking, initPipeline, advanceStage,
-  getPipelineStatus, formatPipelineHUD, hasPipelineTracking,
+  formatPipelineHUD,
 } from '../hooks/autopilot/pipeline.js';
 
 import {

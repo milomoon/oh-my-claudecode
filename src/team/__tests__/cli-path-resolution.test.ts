@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   resolvedEnv: vi.fn<() => NodeJS.ProcessEnv>(() => ({ PATH: '/usr/local/bin:/usr/bin' })),

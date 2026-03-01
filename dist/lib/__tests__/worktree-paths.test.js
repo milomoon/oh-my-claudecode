@@ -211,7 +211,7 @@ describe('worktree-paths', () => {
             expect(() => validateSessionId(sessionId)).not.toThrow();
         });
         it('should generate a new ID after reset', () => {
-            const id1 = getProcessSessionId();
+            const _id1 = getProcessSessionId();
             resetProcessSessionId();
             const id2 = getProcessSessionId();
             // IDs should differ (different timestamp)

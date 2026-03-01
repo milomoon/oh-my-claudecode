@@ -595,7 +595,7 @@ export async function waitForPaneReady(paneId, opts) {
 function paneTailContainsLiteralLine(captured, text) {
     return normalizeTmuxCapture(captured).includes(normalizeTmuxCapture(text));
 }
-async function paneInCopyMode(paneId, execFileAsync) {
+async function paneInCopyMode(paneId, _execFileAsync) {
     try {
         const result = await tmuxAsync(['display-message', '-t', paneId, '-p', '#{pane_in_mode}']);
         return result.stdout.trim() === '1';
@@ -770,7 +770,7 @@ export async function isWorkerAlive(paneId) {
     try {
         const { execFile } = await import('child_process');
         const { promisify } = await import('util');
-        const execFileAsync = promisify(execFile);
+        const _execFileAsync = promisify(execFile);
         const result = await tmuxAsync([
             'display-message', '-t', paneId, '-p', '#{pane_dead}'
         ]);

@@ -336,9 +336,9 @@ describe('runClaude inside-tmux — mouse configuration (issue #890)', () => {
   });
 
   it('still launches claude even if tmux mouse config fails', () => {
-    let callCount = 0;
+    let _callCount = 0;
     (execFileSync as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) => {
-      callCount++;
+      _callCount++;
       if (cmd === 'tmux') throw new Error('tmux set-option failed');
       return Buffer.from('');
     });

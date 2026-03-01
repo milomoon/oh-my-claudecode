@@ -59,7 +59,7 @@ export function getDeprecationWarning(mode) {
  * Creates stage entries for all stages, marking skipped stages as 'skipped'.
  */
 export function buildPipelineTracking(config) {
-    const adapters = getActiveAdapters(config);
+    const _adapters = getActiveAdapters(config);
     const stages = STAGE_ORDER.map(stageId => {
         const adapter = getAdapterById(stageId);
         const isActive = adapter && !adapter.shouldSkip(config);
