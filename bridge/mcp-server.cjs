@@ -21825,7 +21825,7 @@ var EXECUTION_MODES = [
   "ultrawork",
   "ultraqa"
 ];
-var STATE_TOOL_MODES = [...EXECUTION_MODES, "ralplan"];
+var STATE_TOOL_MODES = [...EXECUTION_MODES, "ralplan", "omc-teams"];
 var CANCEL_SIGNAL_TTL_MS = 3e4;
 function getStatePath(mode, root) {
   if (MODE_CONFIGS[mode]) {
@@ -22256,6 +22256,17 @@ var stateListActiveTool = {
           }
         } catch {
         }
+        try {
+          const omcTeamsPath = resolveSessionStatePath("omc-teams", sessionId, root);
+          if ((0, import_fs9.existsSync)(omcTeamsPath)) {
+            const content = (0, import_fs9.readFileSync)(omcTeamsPath, "utf-8");
+            const state = JSON.parse(content);
+            if (state.active) {
+              activeModes.push("omc-teams");
+            }
+          }
+        } catch {
+        }
         if (activeModes.length === 0) {
           return {
             content: [{
@@ -22289,6 +22300,17 @@ ${modeList}`
         } catch {
         }
       }
+      const omcTeamsLegacyPath = getStatePath("omc-teams", root);
+      if ((0, import_fs9.existsSync)(omcTeamsLegacyPath)) {
+        try {
+          const content = (0, import_fs9.readFileSync)(omcTeamsLegacyPath, "utf-8");
+          const state = JSON.parse(content);
+          if (state.active) {
+            legacyActiveModes.push("omc-teams");
+          }
+        } catch {
+        }
+      }
       for (const mode of legacyActiveModes) {
         if (!modeSessionMap.has(mode)) {
           modeSessionMap.set(mode, []);
@@ -22305,6 +22327,17 @@ ${modeList}`
             const state = JSON.parse(content);
             if (state.active) {
               sessionActiveModes.push("ralplan");
+            }
+          }
+        } catch {
+        }
+        try {
+          const omcTeamsSessionPath = resolveSessionStatePath("omc-teams", sid, root);
+          if ((0, import_fs9.existsSync)(omcTeamsSessionPath)) {
+            const content = (0, import_fs9.readFileSync)(omcTeamsSessionPath, "utf-8");
+            const state = JSON.parse(content);
+            if (state.active) {
+              sessionActiveModes.push("omc-teams");
             }
           }
         } catch {
@@ -22472,6 +22505,19 @@ No active sessions for this mode.`);
       const ralplanIcon = ralplanActive ? "[ACTIVE]" : "[INACTIVE]";
       lines.push(`${ralplanIcon} **ralplan**: ${ralplanActive ? "Active" : "Inactive"}`);
       lines.push(`   Path: \`${ralplanPath}\``);
+      const omcTeamsPath = sessionId ? resolveSessionStatePath("omc-teams", sessionId, root) : getStatePath("omc-teams", root);
+      let omcTeamsActive = false;
+      if ((0, import_fs9.existsSync)(omcTeamsPath)) {
+        try {
+          const content = (0, import_fs9.readFileSync)(omcTeamsPath, "utf-8");
+          const state = JSON.parse(content);
+          omcTeamsActive = state.active === true;
+        } catch {
+        }
+      }
+      const omcTeamsIcon = omcTeamsActive ? "[ACTIVE]" : "[INACTIVE]";
+      lines.push(`${omcTeamsIcon} **omc-teams**: ${omcTeamsActive ? "Active" : "Inactive"}`);
+      lines.push(`   Path: \`${omcTeamsPath}\``);
       return {
         content: [{
           type: "text",

@@ -15,7 +15,7 @@ const EXECUTION_MODES = [
     'autopilot', 'team', 'ralph', 'ultrawork', 'ultraqa'
 ];
 // Extended type for state tools - includes ralplan which has state but isn't in mode-registry
-const STATE_TOOL_MODES = [...EXECUTION_MODES, 'ralplan'];
+const STATE_TOOL_MODES = [...EXECUTION_MODES, 'ralplan', 'omc-teams'];
 const CANCEL_SIGNAL_TTL_MS = 30_000;
 /**
  * Get the state file path for any mode (including swarm and ralplan).
@@ -467,6 +467,20 @@ export const stateListActiveTool = {
                 catch {
                     // Ignore parse errors
                 }
+                // Also check omc-teams for this session
+                try {
+                    const omcTeamsPath = resolveSessionStatePath('omc-teams', sessionId, root);
+                    if (existsSync(omcTeamsPath)) {
+                        const content = readFileSync(omcTeamsPath, 'utf-8');
+                        const state = JSON.parse(content);
+                        if (state.active) {
+                            activeModes.push('omc-teams');
+                        }
+                    }
+                }
+                catch {
+                    // Ignore parse errors
+                }
                 if (activeModes.length === 0) {
                     return {
                         content: [{
@@ -500,6 +514,19 @@ export const stateListActiveTool = {
                     // Ignore parse errors
                 }
             }
+            const omcTeamsLegacyPath = getStatePath('omc-teams', root);
+            if (existsSync(omcTeamsLegacyPath)) {
+                try {
+                    const content = readFileSync(omcTeamsLegacyPath, 'utf-8');
+                    const state = JSON.parse(content);
+                    if (state.active) {
+                        legacyActiveModes.push('omc-teams');
+                    }
+                }
+                catch {
+                    // Ignore parse errors
+                }
+            }
             for (const mode of legacyActiveModes) {
                 if (!modeSessionMap.has(mode)) {
                     modeSessionMap.set(mode, []);
@@ -518,6 +545,20 @@ export const stateListActiveTool = {
                         const state = JSON.parse(content);
                         if (state.active) {
                             sessionActiveModes.push('ralplan');
+                        }
+                    }
+                }
+                catch {
+                    // Ignore parse errors
+                }
+                // Also check omc-teams for this session
+                try {
+                    const omcTeamsSessionPath = resolveSessionStatePath('omc-teams', sid, root);
+                    if (existsSync(omcTeamsSessionPath)) {
+                        const content = readFileSync(omcTeamsSessionPath, 'utf-8');
+                        const state = JSON.parse(content);
+                        if (state.active) {
+                            sessionActiveModes.push('omc-teams');
                         }
                     }
                 }
@@ -709,6 +750,22 @@ export const stateGetStatusTool = {
             const ralplanIcon = ralplanActive ? '[ACTIVE]' : '[INACTIVE]';
             lines.push(`${ralplanIcon} **ralplan**: ${ralplanActive ? 'Active' : 'Inactive'}`);
             lines.push(`   Path: \`${ralplanPath}\``);
+            // Also check omc-teams (not in MODE_CONFIGS)
+            const omcTeamsPath = sessionId
+                ? resolveSessionStatePath('omc-teams', sessionId, root)
+                : getStatePath('omc-teams', root);
+            let omcTeamsActive = false;
+            if (existsSync(omcTeamsPath)) {
+                try {
+                    const content = readFileSync(omcTeamsPath, 'utf-8');
+                    const state = JSON.parse(content);
+                    omcTeamsActive = state.active === true;
+                }
+                catch { }
+            }
+            const omcTeamsIcon = omcTeamsActive ? '[ACTIVE]' : '[INACTIVE]';
+            lines.push(`${omcTeamsIcon} **omc-teams**: ${omcTeamsActive ? 'Active' : 'Inactive'}`);
+            lines.push(`   Path: \`${omcTeamsPath}\``);
             return {
                 content: [{
                         type: 'text',
