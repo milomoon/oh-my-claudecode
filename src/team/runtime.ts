@@ -114,12 +114,29 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
 }
 
 async function readJsonSafe<T>(filePath: string): Promise<T | null> {
-  try {
-    const content = await readFile(filePath, 'utf-8');
-    return JSON.parse(content) as T;
-  } catch {
-    return null;
+  const isDoneSignalPath = filePath.endsWith('done.json');
+  const maxAttempts = isDoneSignalPath ? 4 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      try {
+        return JSON.parse(content) as T;
+      } catch {
+        if (!isDoneSignalPath || attempt === maxAttempts) {
+          return null;
+        }
+      }
+    } catch {
+      if (!isDoneSignalPath || attempt === maxAttempts) {
+        return null;
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
+
+  return null;
 }
 
 function parseWorkerIndex(workerNameValue: string): number {

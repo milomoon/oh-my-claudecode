@@ -1126,12 +1126,26 @@ async function writeJson(filePath, data) {
   await (0, import_promises3.writeFile)(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 async function readJsonSafe(filePath) {
-  try {
-    const content = await (0, import_promises3.readFile)(filePath, "utf-8");
-    return JSON.parse(content);
-  } catch {
-    return null;
+  const isDoneSignalPath = filePath.endsWith("done.json");
+  const maxAttempts = isDoneSignalPath ? 4 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const content = await (0, import_promises3.readFile)(filePath, "utf-8");
+      try {
+        return JSON.parse(content);
+      } catch {
+        if (!isDoneSignalPath || attempt === maxAttempts) {
+          return null;
+        }
+      }
+    } catch {
+      if (!isDoneSignalPath || attempt === maxAttempts) {
+        return null;
+      }
+    }
+    await new Promise((resolve3) => setTimeout(resolve3, 25));
   }
+  return null;
 }
 function parseWorkerIndex(workerNameValue) {
   const match = workerNameValue.match(/^worker-(\d+)$/);
