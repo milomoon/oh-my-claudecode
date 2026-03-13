@@ -884,6 +884,7 @@ program
   .option('-f, --force', 'Force reinstall even if up to date')
   .option('-q, --quiet', 'Suppress output except for errors')
   .option('--standalone', 'Force npm update even in plugin context')
+  .option('--clean', 'Purge old plugin cache versions immediately (bypass 24h grace period)')
   .addHelpText('after', `
 Examples:
   $ omc update                   Check and install updates
@@ -935,7 +936,7 @@ Examples:
         console.log(chalk.blue('\nStarting update...\n'));
       }
 
-      const result = await performUpdate({ verbose: !options.quiet, standalone: options.standalone });
+      const result = await performUpdate({ verbose: !options.quiet, standalone: options.standalone, clean: options.clean });
 
       if (result.success) {
         if (!options.quiet) {
@@ -965,9 +966,10 @@ program
   .command('update-reconcile')
   .description('Internal: Reconcile runtime state after update (called by update command)')
   .option('-v, --verbose', 'Show detailed output')
+  .option('--skip-grace-period', 'Bypass 24h grace period for cache purge')
   .action(async (options) => {
     try {
-      const reconcileResult = reconcileUpdateRuntime({ verbose: options.verbose });
+      const reconcileResult = reconcileUpdateRuntime({ verbose: options.verbose, skipGracePeriod: options.skipGracePeriod });
       if (!reconcileResult.success) {
         console.error(chalk.red('Reconciliation failed:'));
         if (reconcileResult.errors) {
