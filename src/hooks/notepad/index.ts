@@ -25,7 +25,9 @@
 
 import { existsSync, readFileSync, mkdirSync } from "fs";
 import { join } from "path";
+import { getOmcRoot } from "../../lib/worktree-paths.js";
 import { atomicWriteFileSync } from "../../lib/atomic-write.js";
+import { lockPathFor, withFileLockSync } from "../../lib/file-lock.js";
 
 // ============================================================================
 // Types
@@ -83,6 +85,30 @@ export const PRIORITY_HEADER = "## Priority Context";
 export const WORKING_MEMORY_HEADER = "## Working Memory";
 export const MANUAL_HEADER = "## MANUAL";
 
+interface SectionRegexSet {
+  extract: RegExp;
+  replace: RegExp;
+  comment: RegExp;
+}
+
+const SECTION_REGEXES: Record<string, SectionRegexSet> = {
+  [PRIORITY_HEADER]: createSectionRegexSet(PRIORITY_HEADER),
+  [WORKING_MEMORY_HEADER]: createSectionRegexSet(WORKING_MEMORY_HEADER),
+  [MANUAL_HEADER]: createSectionRegexSet(MANUAL_HEADER),
+};
+
+function createSectionRegexSet(header: string): SectionRegexSet {
+  return {
+    extract: new RegExp(`${header}\\n([\\s\\S]*?)(?=\\n## [^#]|$)`),
+    replace: new RegExp(`(${header}\\n)([\\s\\S]*?)(?=## |$)`),
+    comment: new RegExp(`${header}\\n(<!--[\\s\\S]*?-->)`),
+  };
+}
+
+function getSectionRegexSet(header: string): SectionRegexSet {
+  return SECTION_REGEXES[header] ?? createSectionRegexSet(header);
+}
+
 // ============================================================================
 // File Operations
 // ============================================================================
@@ -91,14 +117,14 @@ export const MANUAL_HEADER = "## MANUAL";
  * Get the path to notepad.md in .omc subdirectory
  */
 export function getNotepadPath(directory: string): string {
-  return join(directory, ".omc", NOTEPAD_FILENAME);
+  return join(getOmcRoot(directory), NOTEPAD_FILENAME);
 }
 
 /**
  * Initialize notepad.md if it doesn't exist
  */
 export function initNotepad(directory: string): boolean {
-  const omcDir = join(directory, ".omc");
+  const omcDir = getOmcRoot(directory);
   if (!existsSync(omcDir)) {
     try {
       mkdirSync(omcDir, { recursive: true });
@@ -156,8 +182,7 @@ export function readNotepad(directory: string): string | null {
 function extractSection(content: string, header: string): string | null {
   // Match from header to next section (## followed by space, at start of line)
   // We need to match ## at the start of a line, not ### which is a subsection
-  const regex = new RegExp(`${header}\\n([\\s\\S]*?)(?=\\n## [^#]|$)`);
-  const match = content.match(regex);
+  const match = content.match(getSectionRegexSet(header).extract);
   if (!match) {
     return null;
   }
@@ -177,15 +202,13 @@ function replaceSection(
   header: string,
   newContent: string,
 ): string {
-  const regex = new RegExp(`(${header}\\n)([\\s\\S]*?)(?=## |$)`);
+  const { replace, comment: commentPattern } = getSectionRegexSet(header);
 
   // Preserve comment if it exists
-  const commentMatch = content.match(
-    new RegExp(`${header}\\n(<!--[\\s\\S]*?-->)`),
-  );
-  const comment = commentMatch ? commentMatch[1] + "\n" : "";
+  const commentMatch = content.match(commentPattern);
+  const preservedComment = commentMatch ? commentMatch[1] + "\n" : "";
 
-  return content.replace(regex, `$1${comment}${newContent}\n\n`);
+  return content.replace(replace, `$1${preservedComment}${newContent}\n\n`);
 }
 
 // ============================================================================
@@ -248,20 +271,23 @@ export function setPriorityContext(
   }
 
   const notepadPath = getNotepadPath(directory);
-  let notepadContent = readFileSync(notepadPath, "utf-8");
-
-  // Check size
-  const warning =
-    content.length > config.priorityMaxChars
-      ? `Priority Context exceeds ${config.priorityMaxChars} chars (${content.length} chars). Consider condensing.`
-      : undefined;
-
-  // Replace the section
-  notepadContent = replaceSection(notepadContent, PRIORITY_HEADER, content);
 
   try {
-    atomicWriteFileSync(notepadPath, notepadContent);
-    return { success: true, warning };
+    return withFileLockSync(lockPathFor(notepadPath), () => {
+      let notepadContent = readFileSync(notepadPath, "utf-8");
+
+      // Check size
+      const warning =
+        content.length > config.priorityMaxChars
+          ? `Priority Context exceeds ${config.priorityMaxChars} chars (${content.length} chars). Consider condensing.`
+          : undefined;
+
+      // Replace the section
+      notepadContent = replaceSection(notepadContent, PRIORITY_HEADER, content);
+
+      atomicWriteFileSync(notepadPath, notepadContent);
+      return { success: true, warning } as PriorityContextResult;
+    }, { timeoutMs: 5000 });
   } catch {
     return { success: false };
   }
@@ -282,32 +308,35 @@ export function addWorkingMemoryEntry(
   }
 
   const notepadPath = getNotepadPath(directory);
-  let notepadContent = readFileSync(notepadPath, "utf-8");
-
-  // Get current Working Memory content
-  const currentMemory =
-    extractSection(notepadContent, WORKING_MEMORY_HEADER) || "";
-
-  // Format timestamp
-  const now = new Date();
-  const timestamp = now.toISOString().slice(0, 16).replace("T", " "); // YYYY-MM-DD HH:MM
-
-  // Add new entry
-  const newEntry = `### ${timestamp}\n${content}\n`;
-  const updatedMemory = currentMemory
-    ? currentMemory + "\n" + newEntry
-    : newEntry;
-
-  // Replace the section
-  notepadContent = replaceSection(
-    notepadContent,
-    WORKING_MEMORY_HEADER,
-    updatedMemory,
-  );
 
   try {
-    atomicWriteFileSync(notepadPath, notepadContent);
-    return true;
+    return withFileLockSync(lockPathFor(notepadPath), () => {
+      let notepadContent = readFileSync(notepadPath, "utf-8");
+
+      // Get current Working Memory content
+      const currentMemory =
+        extractSection(notepadContent, WORKING_MEMORY_HEADER) || "";
+
+      // Format timestamp
+      const now = new Date();
+      const timestamp = now.toISOString().slice(0, 16).replace("T", " "); // YYYY-MM-DD HH:MM
+
+      // Add new entry
+      const newEntry = `### ${timestamp}\n${content}\n`;
+      const updatedMemory = currentMemory
+        ? currentMemory + "\n" + newEntry
+        : newEntry;
+
+      // Replace the section
+      notepadContent = replaceSection(
+        notepadContent,
+        WORKING_MEMORY_HEADER,
+        updatedMemory,
+      );
+
+      atomicWriteFileSync(notepadPath, notepadContent);
+      return true;
+    }, { timeoutMs: 5000 });
   } catch {
     return false;
   }
@@ -325,25 +354,28 @@ export function addManualEntry(directory: string, content: string): boolean {
   }
 
   const notepadPath = getNotepadPath(directory);
-  let notepadContent = readFileSync(notepadPath, "utf-8");
-
-  // Get current MANUAL content
-  const currentManual = extractSection(notepadContent, MANUAL_HEADER) || "";
-
-  // Add new entry with timestamp
-  const now = new Date();
-  const timestamp = now.toISOString().slice(0, 16).replace("T", " "); // YYYY-MM-DD HH:MM
-  const newEntry = `### ${timestamp}\n${content}\n`;
-  const updatedManual = currentManual
-    ? currentManual + "\n" + newEntry
-    : newEntry;
-
-  // Replace the section
-  notepadContent = replaceSection(notepadContent, MANUAL_HEADER, updatedManual);
 
   try {
-    atomicWriteFileSync(notepadPath, notepadContent);
-    return true;
+    return withFileLockSync(lockPathFor(notepadPath), () => {
+      let notepadContent = readFileSync(notepadPath, "utf-8");
+
+      // Get current MANUAL content
+      const currentManual = extractSection(notepadContent, MANUAL_HEADER) || "";
+
+      // Add new entry with timestamp
+      const now = new Date();
+      const timestamp = now.toISOString().slice(0, 16).replace("T", " "); // YYYY-MM-DD HH:MM
+      const newEntry = `### ${timestamp}\n${content}\n`;
+      const updatedManual = currentManual
+        ? currentManual + "\n" + newEntry
+        : newEntry;
+
+      // Replace the section
+      notepadContent = replaceSection(notepadContent, MANUAL_HEADER, updatedManual);
+
+      atomicWriteFileSync(notepadPath, notepadContent);
+      return true;
+    }, { timeoutMs: 5000 });
   } catch {
     return false;
   }
@@ -365,55 +397,57 @@ export function pruneOldEntries(
     return { pruned: 0, remaining: 0 };
   }
 
-  let notepadContent = readFileSync(notepadPath, "utf-8");
-  const workingMemory = extractSection(notepadContent, WORKING_MEMORY_HEADER);
-
-  if (!workingMemory) {
-    return { pruned: 0, remaining: 0 };
-  }
-
-  // Parse entries
-  const entryRegex =
-    /### (\d{4}-\d{2}-\d{2} \d{2}:\d{2})\n([\s\S]*?)(?=### |$)/g;
-  const entries: Array<{ timestamp: string; content: string }> = [];
-  let match: RegExpExecArray | null = entryRegex.exec(workingMemory);
-
-  while (match !== null) {
-    entries.push({
-      timestamp: match[1],
-      content: match[2].trim(),
-    });
-    match = entryRegex.exec(workingMemory);
-  }
-
-  // Calculate cutoff date
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - daysOld);
-
-  // Filter entries
-  const kept = entries.filter((entry) => {
-    const entryDate = new Date(entry.timestamp);
-    return entryDate >= cutoff;
-  });
-
-  const pruned = entries.length - kept.length;
-
-  // Rebuild Working Memory section
-  const newContent = kept
-    .map((entry) => `### ${entry.timestamp}\n${entry.content}`)
-    .join("\n\n");
-
-  notepadContent = replaceSection(
-    notepadContent,
-    WORKING_MEMORY_HEADER,
-    newContent,
-  );
-
   try {
-    atomicWriteFileSync(notepadPath, notepadContent);
-    return { pruned, remaining: kept.length };
+    return withFileLockSync(lockPathFor(notepadPath), () => {
+      let notepadContent = readFileSync(notepadPath, "utf-8");
+      const workingMemory = extractSection(notepadContent, WORKING_MEMORY_HEADER);
+
+      if (!workingMemory) {
+        return { pruned: 0, remaining: 0 } as PruneResult;
+      }
+
+      // Parse entries
+      const entryRegex =
+        /### (\d{4}-\d{2}-\d{2} \d{2}:\d{2})\n([\s\S]*?)(?=### |$)/g;
+      const entries: Array<{ timestamp: string; content: string }> = [];
+      let match: RegExpExecArray | null = entryRegex.exec(workingMemory);
+
+      while (match !== null) {
+        entries.push({
+          timestamp: match[1],
+          content: match[2].trim(),
+        });
+        match = entryRegex.exec(workingMemory);
+      }
+
+      // Calculate cutoff date
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - daysOld);
+
+      // Filter entries
+      const kept = entries.filter((entry) => {
+        const entryDate = new Date(entry.timestamp);
+        return entryDate >= cutoff;
+      });
+
+      const pruned = entries.length - kept.length;
+
+      // Rebuild Working Memory section
+      const newContent = kept
+        .map((entry) => `### ${entry.timestamp}\n${entry.content}`)
+        .join("\n\n");
+
+      notepadContent = replaceSection(
+        notepadContent,
+        WORKING_MEMORY_HEADER,
+        newContent,
+      );
+
+      atomicWriteFileSync(notepadPath, notepadContent);
+      return { pruned, remaining: kept.length } as PruneResult;
+    }, { timeoutMs: 5000 });
   } catch {
-    return { pruned: 0, remaining: entries.length };
+    return { pruned: 0, remaining: 0 };
   }
 }
 
@@ -441,17 +475,21 @@ export function getNotepadStats(directory: string): NotepadStats {
   const priorityContext = extractSection(content, PRIORITY_HEADER) || "";
   const workingMemory = extractSection(content, WORKING_MEMORY_HEADER) || "";
 
-  // Count entries
-  const entryMatches = workingMemory.match(
-    /### \d{4}-\d{2}-\d{2} \d{2}:\d{2}/g,
+  // Count entries — support both legacy ### and new HTML comment delimiter formats
+  const wmMatches = workingMemory.match(
+    /<\!-- WM:\d{4}-\d{2}-\d{2} \d{2}:\d{2} -->/g,
   );
+  const legacyMatches = workingMemory.match(/### \d{4}-\d{2}-\d{2} \d{2}:\d{2}/g);
+  const entryMatches = wmMatches ?? legacyMatches;
   const entryCount = entryMatches ? entryMatches.length : 0;
 
   // Find oldest entry
   let oldestEntry: string | null = null;
   if (entryMatches && entryMatches.length > 0) {
     // Extract just the timestamp part
-    const timestamps = entryMatches.map((m) => m.replace("### ", ""));
+    const timestamps = entryMatches.map((m) =>
+      m.startsWith("<!--") ? m.replace(/^<\!-- WM:| -->$/g, "") : m.replace("### ", "")
+    );
     timestamps.sort();
     oldestEntry = timestamps[0];
   }

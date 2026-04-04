@@ -11,6 +11,8 @@
  * 4. If architect approves -> truly complete, use /oh-my-claudecode:cancel to exit
  * 5. If architect finds flaws -> continue ralph with architect feedback
  */
+import type { UserStory } from './prd.js';
+import type { RalphCriticMode } from './loop.js';
 export interface VerificationState {
     /** Whether verification is pending */
     pending: boolean;
@@ -28,6 +30,8 @@ export interface VerificationState {
     requested_at: string;
     /** Original ralph task */
     original_task: string;
+    /** Reviewer mode to use for verification */
+    critic_mode?: RalphCriticMode;
 }
 /**
  * Read verification state
@@ -46,15 +50,16 @@ export declare function clearVerificationState(directory: string, sessionId?: st
 /**
  * Start verification process
  */
-export declare function startVerification(directory: string, completionClaim: string, originalTask: string, sessionId?: string): VerificationState;
+export declare function startVerification(directory: string, completionClaim: string, originalTask: string, criticMode?: RalphCriticMode, sessionId?: string): VerificationState;
 /**
  * Record architect feedback
  */
 export declare function recordArchitectFeedback(directory: string, approved: boolean, feedback: string, sessionId?: string): VerificationState | null;
 /**
  * Generate architect verification prompt
+ * When a currentStory is provided, includes its specific acceptance criteria for targeted verification.
  */
-export declare function getArchitectVerificationPrompt(state: VerificationState): string;
+export declare function getArchitectVerificationPrompt(state: VerificationState, currentStory?: UserStory): string;
 /**
  * Generate continuation prompt after architect rejection
  */

@@ -3,7 +3,7 @@
  * Provides unified process management across Windows, macOS, and Linux.
  */
 
-import { execSync, execFile } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fsPromises from 'fs/promises';
 
@@ -34,7 +34,7 @@ async function killProcessTreeWindows(pid: number, force: boolean): Promise<bool
     if (force) {
       args.unshift('/F');
     }
-    execSync(`taskkill ${args.join(' ')}`, {
+    execFileSync('taskkill.exe', args, {
       stdio: 'ignore',
       timeout: 5000,
       windowsHide: true
@@ -64,6 +64,7 @@ function killProcessTreeUnix(pid: number, signal: NodeJS.Signals): boolean {
 /**
  * Check if a process is alive.
  * Works cross-platform by attempting signal 0.
+ * EPERM means the process exists but we lack permission to signal it.
  */
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -71,7 +72,10 @@ export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (e: unknown) {
+    if (e && typeof e === 'object' && 'code' in e && (e as NodeJS.ErrnoException).code === 'EPERM') {
+      return true;
+    }
     return false;
   }
 }
@@ -100,22 +104,78 @@ async function getProcessStartTimeWindows(pid: number): Promise<number | undefin
       'get', 'CreationDate', '/format:csv'
     ], { timeout: 5000, windowsHide: true });
 
-    const lines = stdout.trim().split(/\r?\n/).filter(l => l.trim());
-    if (lines.length < 2) return undefined;
+    const wmicTime = parseWmicCreationDate(stdout);
+    if (wmicTime !== undefined) return wmicTime;
+  } catch {
+    // WMIC is deprecated on newer Windows builds; fall back to PowerShell.
+  }
 
-    const match = lines[1].match(/,(\d{14})/);
-    if (!match) return undefined;
+  const cimTime = await getProcessStartTimeWindowsPowerShellCim(pid);
+  if (cimTime !== undefined) return cimTime;
 
-    const d = match[1];
-    const date = new Date(
-      parseInt(d.slice(0, 4)),
-      parseInt(d.slice(4, 6)) - 1,
-      parseInt(d.slice(6, 8)),
-      parseInt(d.slice(8, 10)),
-      parseInt(d.slice(10, 12)),
-      parseInt(d.slice(12, 14))
+  return getProcessStartTimeWindowsPowerShellProcess(pid);
+}
+
+function parseWmicCreationDate(stdout: string): number | undefined {
+  const lines = stdout.trim().split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return undefined;
+
+  const candidate = lines.find(line => /,\d{14}/.test(line)) ?? lines[1];
+  const match = candidate.match(/,(\d{14})/);
+  if (!match) return undefined;
+
+  const d = match[1];
+  const date = new Date(
+    parseInt(d.slice(0, 4), 10),
+    parseInt(d.slice(4, 6), 10) - 1,
+    parseInt(d.slice(6, 8), 10),
+    parseInt(d.slice(8, 10), 10),
+    parseInt(d.slice(10, 12), 10),
+    parseInt(d.slice(12, 14), 10)
+  );
+
+  const value = date.getTime();
+  return Number.isNaN(value) ? undefined : value;
+}
+
+function parseWindowsEpochMilliseconds(stdout: string): number | undefined {
+  const match = stdout.trim().match(/-?\d+/);
+  if (!match) return undefined;
+  const value = parseInt(match[0], 10);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+async function getProcessStartTimeWindowsPowerShellCim(pid: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction Stop; if ($p -and $p.CreationDate) { [DateTimeOffset]$p.CreationDate | ForEach-Object { $_.ToUnixTimeMilliseconds() } }`
+      ],
+      { timeout: 5000, windowsHide: true }
     );
-    return date.getTime();
+    return parseWindowsEpochMilliseconds(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+async function getProcessStartTimeWindowsPowerShellProcess(pid: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p -and $p.StartTime) { [DateTimeOffset]$p.StartTime | ForEach-Object { $_.ToUnixTimeMilliseconds() } }`
+      ],
+      { timeout: 5000, windowsHide: true }
+    );
+    return parseWindowsEpochMilliseconds(stdout);
   } catch {
     return undefined;
   }

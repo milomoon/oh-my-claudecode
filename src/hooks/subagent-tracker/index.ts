@@ -15,10 +15,12 @@ import {
   writeFileSync,
   mkdirSync,
   unlinkSync,
-  statSync,
 } from "fs";
 import { join } from "path";
+import { getOmcRoot } from '../../lib/worktree-paths.js';
 import { recordAgentStart, recordAgentStop } from './session-replay.js';
+import { recordMissionAgentStart, recordMissionAgentStop } from '../../hud/mission-board.js';
+import { isProcessAlive } from '../../platform/index.js';
 
 // ============================================================================
 // Types
@@ -28,7 +30,7 @@ export interface SubagentInfo {
   agent_id: string;
   agent_type: string;
   started_at: string;
-  parent_mode: string; // 'autopilot' | 'ultrapilot' | 'ultrawork' | 'swarm' | 'none'
+  parent_mode: string; // 'autopilot' | 'ultrawork' | 'team' | 'ralph' | 'none'
   task_description?: string;
   file_ownership?: string[];
   status: "running" | "completed" | "failed";
@@ -148,19 +150,6 @@ const pendingWrites = new Map<
 const flushInProgress = new Set<string>();
 
 /**
- * Check if a process is still alive
- * Signal 0 doesn't kill the process, just checks if it exists
- */
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Synchronous sleep using Atomics.wait
  * Avoids CPU-spinning busy-wait loops
  */
@@ -241,8 +230,8 @@ export function mergeTrackerStates(
  * Acquire file lock with timeout and stale lock detection
  */
 function acquireLock(directory: string): boolean {
-  const lockPath = join(directory, ".omc", "state", "subagent-tracker.lock");
-  const lockDir = join(directory, ".omc", "state");
+  const lockPath = join(getOmcRoot(directory), "state", "subagent-tracker.lock");
+  const lockDir = join(getOmcRoot(directory), "state");
 
   if (!existsSync(lockDir)) {
     mkdirSync(lockDir, { recursive: true });
@@ -316,7 +305,7 @@ function acquireLock(directory: string): boolean {
  * Release file lock
  */
 function releaseLock(directory: string): void {
-  const lockPath = join(directory, ".omc", "state", "subagent-tracker.lock");
+  const lockPath = join(getOmcRoot(directory), "state", "subagent-tracker.lock");
   try {
     unlinkSync(lockPath);
   } catch {
@@ -328,7 +317,7 @@ function releaseLock(directory: string): void {
  * Get the state file path
  */
 export function getStateFilePath(directory: string): string {
-  const stateDir = join(directory, ".omc", "state");
+  const stateDir = join(getOmcRoot(directory), "state");
   if (!existsSync(stateDir)) {
     mkdirSync(stateDir, { recursive: true });
   }
@@ -506,7 +495,7 @@ export function flushPendingWrites(): void {
  * Detect the current parent mode from state files
  */
 function detectParentMode(directory: string): string {
-  const stateDir = join(directory, ".omc", "state");
+  const stateDir = join(getOmcRoot(directory), "state");
 
   if (!existsSync(stateDir)) {
     return "none";
@@ -514,28 +503,17 @@ function detectParentMode(directory: string): string {
 
   // Check in order of specificity
   const modeFiles = [
-    { file: "ultrapilot-state.json", mode: "ultrapilot" },
     { file: "autopilot-state.json", mode: "autopilot" },
-    { file: "swarm.db", mode: "swarm" },
     { file: "ultrawork-state.json", mode: "ultrawork" },
     { file: "ralph-state.json", mode: "ralph" },
+    { file: "team-state.json", mode: "team" },
   ];
 
   for (const { file, mode } of modeFiles) {
     const filePath = join(stateDir, file);
     if (existsSync(filePath)) {
-      // Special case for swarm.db - just check existence and size
-      if (file === 'swarm.db') {
-        try {
-          const stats = statSync(filePath);
-          if (stats.size > 0) {
-            return mode;
-          }
-        } catch {
-          continue;
-        }
-      } else {
-        // JSON file check (existing logic)
+      {
+        // JSON file check
         try {
           const content = readFileSync(filePath, "utf-8");
           const state = JSON.parse(content);
@@ -589,29 +567,65 @@ export function processSubagentStart(input: SubagentStartInput): HookOutput {
   try {
     const state = readTrackingState(input.cwd);
     const parentMode = detectParentMode(input.cwd);
+    const startedAt = new Date().toISOString();
+    const taskDescription = input.prompt?.substring(0, 200); // Truncate for storage
+    const existingAgent = state.agents.find((agent) => agent.agent_id === input.agent_id);
+    const isDuplicateRunningStart = existingAgent?.status === "running";
+    let trackedAgent: SubagentInfo;
 
-    // Create new agent entry
-    const agentInfo: SubagentInfo = {
-      agent_id: input.agent_id,
-      agent_type: input.agent_type,
-      started_at: new Date().toISOString(),
-      parent_mode: parentMode,
-      task_description: input.prompt?.substring(0, 200), // Truncate for storage
-      status: "running",
-      model: input.model,
-    };
+    if (existingAgent) {
+      existingAgent.agent_type = input.agent_type;
+      existingAgent.parent_mode = parentMode;
+      existingAgent.task_description = taskDescription;
+      existingAgent.model = input.model;
 
-    // Add to state
-    state.agents.push(agentInfo);
-    state.total_spawned++;
+      if (existingAgent.status !== "running") {
+        existingAgent.status = "running";
+        existingAgent.started_at = startedAt;
+        existingAgent.completed_at = undefined;
+        existingAgent.duration_ms = undefined;
+        existingAgent.output_summary = undefined;
+        state.total_spawned++;
+      }
+      trackedAgent = existingAgent;
+    } else {
+      // Create new agent entry
+      const agentInfo: SubagentInfo = {
+        agent_id: input.agent_id,
+        agent_type: input.agent_type,
+        started_at: startedAt,
+        parent_mode: parentMode,
+        task_description: taskDescription,
+        status: "running",
+        model: input.model,
+      };
+
+      // Add to state
+      state.agents.push(agentInfo);
+      state.total_spawned++;
+      trackedAgent = agentInfo;
+    }
 
     // Write updated state
     writeTrackingState(input.cwd, state);
 
-    // Record to session replay JSONL for /trace
-    try {
-      recordAgentStart(input.cwd, input.session_id, input.agent_id, input.agent_type, input.prompt, parentMode, input.model);
-    } catch { /* best-effort */ }
+    if (!isDuplicateRunningStart) {
+      // Record to session replay JSONL for /trace
+      try {
+        recordAgentStart(input.cwd, input.session_id, input.agent_id, input.agent_type, input.prompt, parentMode, input.model);
+      } catch { /* best-effort */ }
+
+      try {
+        recordMissionAgentStart(input.cwd, {
+          sessionId: input.session_id,
+          agentId: input.agent_id,
+          agentType: input.agent_type,
+          parentMode,
+          taskDescription: input.prompt,
+          at: trackedAgent.started_at,
+        });
+      } catch { /* best-effort */ }
+    }
 
     // Check for stale agents
     const staleAgents = getStaleAgents(state);
@@ -701,6 +715,16 @@ export function processSubagentStop(input: SubagentStopInput): HookOutput {
       recordAgentStop(input.cwd, input.session_id, input.agent_id, agentType, succeeded, trackedAgent?.duration_ms);
     } catch { /* best-effort */ }
 
+    try {
+      recordMissionAgentStop(input.cwd, {
+        sessionId: input.session_id,
+        agentId: input.agent_id,
+        success: succeeded,
+        outputSummary: agentIndex !== -1 ? state.agents[agentIndex]?.output_summary : input.output,
+        at: agentIndex !== -1 ? state.agents[agentIndex]?.completed_at : new Date().toISOString(),
+      });
+    } catch { /* best-effort */ }
+
     const runningCount = state.agents.filter(
       (a) => a.status === "running",
     ).length;
@@ -766,9 +790,21 @@ export function cleanupStaleAgents(directory: string): number {
 /**
  * Get count of active (running) agents
  */
-export function getActiveAgentCount(directory: string): number {
+export interface ActiveAgentSnapshot {
+  count: number;
+  lastUpdatedAt?: string;
+}
+
+export function getActiveAgentSnapshot(directory: string): ActiveAgentSnapshot {
   const state = readTrackingState(directory);
-  return state.agents.filter((a) => a.status === "running").length;
+  return {
+    count: state.agents.filter((a) => a.status === "running").length,
+    lastUpdatedAt: state.last_updated,
+  };
+}
+
+export function getActiveAgentCount(directory: string): number {
+  return getActiveAgentSnapshot(directory).count;
 }
 
 /**
@@ -1286,13 +1322,13 @@ export function updateTokenUsage(
           cost_usd: 0,
         };
       }
-      if (tokens.input_tokens)
+      if (tokens.input_tokens !== undefined)
         agent.token_usage.input_tokens += tokens.input_tokens;
-      if (tokens.output_tokens)
+      if (tokens.output_tokens !== undefined)
         agent.token_usage.output_tokens += tokens.output_tokens;
-      if (tokens.cache_read_tokens)
+      if (tokens.cache_read_tokens !== undefined)
         agent.token_usage.cache_read_tokens += tokens.cache_read_tokens;
-      if (tokens.cost_usd) agent.token_usage.cost_usd += tokens.cost_usd;
+      if (tokens.cost_usd !== undefined) agent.token_usage.cost_usd += tokens.cost_usd;
       writeTrackingState(directory, state);
     }
   } finally {

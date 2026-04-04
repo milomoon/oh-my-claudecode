@@ -1,6 +1,8 @@
 ---
 name: ultrawork
 description: Parallel execution engine for high-throughput task completion
+argument-hint: "<task description with parallel work items>"
+level: 4
 ---
 
 <Purpose>
@@ -50,9 +52,9 @@ Sequential task execution wastes time when tasks are independent. Ultrawork enab
 </Steps>
 
 <Tool_Usage>
-- Use `Task(subagent_type="oh-my-claudecode:executor-low", model="haiku", ...)` for simple changes
+- Use `Task(subagent_type="oh-my-claudecode:executor", model="haiku", ...)` for simple changes
 - Use `Task(subagent_type="oh-my-claudecode:executor", model="sonnet", ...)` for standard work
-- Use `Task(subagent_type="oh-my-claudecode:executor-high", model="opus", ...)` for complex work
+- Use `Task(subagent_type="oh-my-claudecode:executor", model="opus", ...)` for complex work
 - Use `run_in_background: true` for package installs, builds, and test suites
 - Use foreground execution for quick status checks and file operations
 </Tool_Usage>
@@ -61,7 +63,7 @@ Sequential task execution wastes time when tasks are independent. Ultrawork enab
 <Good>
 Three independent tasks fired simultaneously:
 ```
-Task(subagent_type="oh-my-claudecode:executor-low", model="haiku", prompt="Add missing type export for Config interface")
+Task(subagent_type="oh-my-claudecode:executor", model="haiku", prompt="Add missing type export for Config interface")
 Task(subagent_type="oh-my-claudecode:executor", model="sonnet", prompt="Implement the /api/users endpoint with validation")
 Task(subagent_type="oh-my-claudecode:executor", model="sonnet", prompt="Add integration tests for the auth middleware")
 ```
@@ -72,7 +74,7 @@ Why good: Independent tasks at appropriate tiers, all fired at once.
 Correct use of background execution:
 ```
 Task(subagent_type="oh-my-claudecode:executor", model="sonnet", prompt="npm install && npm run build", run_in_background=true)
-Task(subagent_type="oh-my-claudecode:executor-low", model="haiku", prompt="Update the README with new API endpoints")
+Task(subagent_type="oh-my-claudecode:executor", model="haiku", prompt="Update the README with new API endpoints")
 ```
 Why good: Long build runs in background while short task runs in foreground.
 </Good>
@@ -80,7 +82,7 @@ Why good: Long build runs in background while short task runs in foreground.
 <Bad>
 Sequential execution of independent work:
 ```
-result1 = Task(executor-low, "Add type export")  # wait...
+result1 = Task(executor, "Add type export")  # wait...
 result2 = Task(executor, "Implement endpoint")     # wait...
 result3 = Task(executor, "Add tests")              # wait...
 ```
@@ -90,9 +92,9 @@ Why bad: These tasks are independent. Running them sequentially wastes time.
 <Bad>
 Wrong tier selection:
 ```
-Task(subagent_type="oh-my-claudecode:executor-high", model="opus", prompt="Add a missing semicolon")
+Task(subagent_type="oh-my-claudecode:executor", model="opus", prompt="Add a missing semicolon")
 ```
-Why bad: Opus is expensive overkill for a trivial fix. Use executor-low with Haiku instead.
+Why bad: Opus is expensive overkill for a trivial fix. Use executor with Haiku instead.
 </Bad>
 </Examples>
 
@@ -121,10 +123,7 @@ ralph (persistence wrapper)
 autopilot (autonomous execution)
  \-- includes: ralph
      \-- includes: ultrawork (this skill)
-
-ecomode (token efficiency)
- \-- modifies: ultrawork's model selection
 ```
 
-Ultrawork is the parallelism layer. Ralph adds persistence and verification. Autopilot adds the full lifecycle pipeline. Ecomode adjusts ultrawork's model routing to favor cheaper models.
+Ultrawork is the parallelism layer. Ralph adds persistence and verification. Autopilot adds the full lifecycle pipeline.
 </Advanced>

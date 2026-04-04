@@ -2,14 +2,23 @@
  * Configuration Loader
  *
  * Handles loading and merging configuration from multiple sources:
- * - User config: ~/.config/claude-sisyphus/config.jsonc
- * - Project config: .claude/sisyphus.jsonc
+ * - User config: ~/.config/claude-omc/config.jsonc
+ * - Project config: .claude/omc.jsonc
  * - Environment variables
  */
-import type { PluginConfig } from '../shared/types.js';
+import type { PluginConfig } from "../shared/types.js";
 /**
- * Default configuration
+ * Default configuration.
+ *
+ * Model IDs are resolved from environment variables (OMC_MODEL_HIGH,
+ * OMC_MODEL_MEDIUM, OMC_MODEL_LOW) with built-in fallbacks.
+ * User/project config files can further override via deepMerge.
+ *
+ * Note: env vars for external model defaults (OMC_CODEX_DEFAULT_MODEL,
+ * OMC_GEMINI_DEFAULT_MODEL) are read lazily in loadEnvConfig() to avoid
+ * capturing stale values at module load time.
  */
+export declare function buildDefaultConfig(): PluginConfig;
 export declare const DEFAULT_CONFIG: PluginConfig;
 /**
  * Configuration file locations
@@ -25,7 +34,7 @@ export declare function loadJsoncFile(path: string): PluginConfig | null;
 /**
  * Deep merge two objects
  */
-export declare function deepMerge<T extends Record<string, unknown>>(target: T, source: Partial<T>): T;
+export declare function deepMerge<T extends object>(target: T, source: Partial<T>): T;
 /**
  * Load configuration from environment variables
  */
@@ -34,6 +43,7 @@ export declare function loadEnvConfig(): Partial<PluginConfig>;
  * Load and merge all configuration sources
  */
 export declare function loadConfig(): PluginConfig;
+export declare function compactOmcStartupGuidance(content: string): string;
 /**
  * Find and load AGENTS.md or CLAUDE.md files for context injection
  */

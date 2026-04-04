@@ -8,7 +8,7 @@
  */
 
 import type { ActiveAgent, AgentsFormat } from '../types.js';
-import { cyan, dim, RESET, getModelTierColor, getDurationColor } from '../colors.js';
+import { dim, RESET, getModelTierColor, getDurationColor } from '../colors.js';
 import { truncateToWidth } from '../../utils/string-width.js';
 
 const CYAN = '\x1b[36m';
@@ -40,11 +40,8 @@ const AGENT_TYPE_CODES: Record<string, string> = {
   // Debugger - 'g' for debuGger (d taken by designer)
   debugger: 'g',            // sonnet
 
-  // Executor - 'X' for eXecutor
-  executor: 'x',            // sonnet
-
-  // Deep Executor - 'X' (same family as executor, opus tier)
-  'deep-executor': 'X',     // opus
+  // Executor - 'x' for eXecutor (sonnet default, opus for complex tasks)
+  executor: 'x',            // sonnet/opus
 
   // Verifier - 'V' for Verifier (but vision uses 'v'... use uppercase 'V' for governance role)
   verifier: 'V',            // sonnet
@@ -54,9 +51,6 @@ const AGENT_TYPE_CODES: Record<string, string> = {
   // ============================================================
   // Style Reviewer - 'Y' for stYle
   'style-reviewer': 'y',    // haiku
-
-  // Quality Reviewer - 'Q' for Quality (but qa-tester uses 'q'... use uppercase 'Q')
-  'quality-reviewer': 'Q',  // sonnet
 
   // API Reviewer - 'I' for Interface/API
   'api-reviewer': 'i',      // sonnet
@@ -79,11 +73,8 @@ const AGENT_TYPE_CODES: Record<string, string> = {
   // Test Engineer - 'T' (but analyst uses 'T'... use uppercase 'T')
   'test-engineer': 't',     // sonnet
 
-  // Quality Strategist - 'Q' for Quality (strategist role)
-  'quality-strategist': 'Q',     // sonnet
-
-  // Build Fixer - 'B' for Build
-  'build-fixer': 'b',       // sonnet
+  // Quality Strategist - 'Qs' for Quality Strategist (disambiguated from quality-reviewer)
+  'quality-strategist': 'Qs',     // sonnet
 
   // Designer - 'd' for Designer
   designer: 'd',            // sonnet
@@ -103,14 +94,14 @@ const AGENT_TYPE_CODES: Record<string, string> = {
   // ============================================================
   // PRODUCT LANE
   // ============================================================
-  // Product Manager - 'P' for Product (uppercase = important)
-  'product-manager': 'P',   // sonnet
+  // Product Manager - 'Pm' for Product Manager (disambiguated from planner)
+  'product-manager': 'Pm',   // sonnet
 
   // UX Researcher - 'u' for Ux
   'ux-researcher': 'u',     // sonnet
 
-  // Information Architect - 'I' for Information
-  'information-architect': 'I', // sonnet
+  // Information Architect - 'Ia' for Information Architect (disambiguated from api-reviewer)
+  'information-architect': 'Ia', // sonnet
 
   // Product Analyst - 'a' for analyst
   'product-analyst': 'a',   // sonnet
@@ -124,10 +115,13 @@ const AGENT_TYPE_CODES: Record<string, string> = {
   // Vision - 'V' for Vision (lowercase since sonnet)
   vision: 'v',              // sonnet
 
+  // Document Specialist - 'D' for Document
+  'document-specialist': 'D', // sonnet
+
   // ============================================================
   // BACKWARD COMPATIBILITY (Deprecated)
   // ============================================================
-  // Researcher - 'R' for Researcher (deprecated, points to dependency-expert)
+  // Researcher - 'r' for Researcher (deprecated, points to document-specialist)
   researcher: 'r',          // sonnet
 };
 
@@ -147,13 +141,16 @@ function getAgentCode(agentType: string, model?: string): string {
     code = shortName.charAt(0).toUpperCase();
   }
 
-  // Determine case based on model tier if code is single letter
+  // Determine case based on model tier
+  // For single-char codes, the whole code changes case
+  // For multi-char codes, only the first character indicates tier
   if (model) {
     const tier = model.toLowerCase();
-    if (tier.includes('opus')) {
-      code = code.toUpperCase();
+    if (code.length === 1) {
+      code = tier.includes('opus') ? code.toUpperCase() : code.toLowerCase();
     } else {
-      code = code.toLowerCase();
+      const first = tier.includes('opus') ? code[0].toUpperCase() : code[0].toLowerCase();
+      code = first + code.slice(1);
     }
   }
 
@@ -292,19 +289,20 @@ export function renderAgentsDetailed(agents: ActiveAgent[]): string | null {
 
     // Abbreviate common names
     if (name === 'executor') name = 'exec';
-    if (name === 'deep-executor') name = 'deep-x';
+    if (name === 'deep-executor') name = 'exec'; // deprecated alias
     if (name === 'designer') name = 'design';
     if (name === 'qa-tester') name = 'qa';
     if (name === 'scientist') name = 'sci';
     if (name === 'security-reviewer') name = 'sec';
-    if (name === 'build-fixer') name = 'build';
+    if (name === 'build-fixer') name = 'debug'; // deprecated alias
     if (name === 'code-reviewer') name = 'review';
     if (name === 'git-master') name = 'git';
     if (name === 'style-reviewer') name = 'style';
-    if (name === 'quality-reviewer') name = 'quality';
+    if (name === 'quality-reviewer') name = 'review'; // deprecated alias
     if (name === 'api-reviewer') name = 'api-rev';
     if (name === 'performance-reviewer') name = 'perf';
     if (name === 'dependency-expert') name = 'dep-exp';
+    if (name === 'document-specialist') name = 'doc-spec';
     if (name === 'test-engineer') name = 'test-eng';
     if (name === 'quality-strategist') name = 'qs';
     if (name === 'debugger') name = 'debug';
@@ -339,27 +337,28 @@ function truncateDescription(desc: string | undefined, maxWidth: number = 20): s
  */
 function getShortAgentName(agentType: string): string {
   const parts = agentType.split(':');
-  let name = parts[parts.length - 1] || agentType;
+  const name = parts[parts.length - 1] || agentType;
 
   // Abbreviate common names
   const abbrevs: Record<string, string> = {
     // Build/Analysis Lane
     'executor': 'exec',
-    'deep-executor': 'deep-x',
+    'deep-executor': 'exec', // deprecated alias
     'debugger': 'debug',
     'verifier': 'verify',
     // Review Lane
     'style-reviewer': 'style',
-    'quality-reviewer': 'quality',
+    'quality-reviewer': 'review', // deprecated alias
     'api-reviewer': 'api-rev',
     'security-reviewer': 'sec',
     'performance-reviewer': 'perf',
     'code-reviewer': 'review',
     // Domain Specialists
     'dependency-expert': 'dep-exp',
+    'document-specialist': 'doc-spec',
     'test-engineer': 'test-eng',
     'quality-strategist': 'qs',
-    'build-fixer': 'build',
+    'build-fixer': 'debug', // deprecated alias
     'designer': 'design',
     'qa-tester': 'qa',
     'scientist': 'sci',

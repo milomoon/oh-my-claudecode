@@ -23,7 +23,7 @@ export interface PersistentModeResult {
     /** Message to inject into context */
     message: string;
     /** Which mode triggered the block */
-    mode: 'ralph' | 'ultrawork' | 'todo-continuation' | 'autopilot' | 'none';
+    mode: 'ralph' | 'ultrawork' | 'todo-continuation' | 'autopilot' | 'team' | 'ralplan' | 'none';
     /** Additional metadata */
     metadata?: {
         todoCount?: number;
@@ -37,6 +37,7 @@ export interface PersistentModeResult {
         toolError?: ToolErrorState;
     };
 }
+export declare function shouldWriteStateBack(statePath: string | null | undefined): boolean;
 /**
  * Read last tool error from state directory.
  * Returns null if file doesn't exist or error is stale (>60 seconds old).
@@ -56,14 +57,28 @@ export declare function getToolErrorRetryGuidance(toolError: ToolErrorState | nu
  */
 export declare function resetTodoContinuationAttempts(sessionId: string): void;
 /**
+ * Read the session-idle notification cooldown in seconds from global OMC config.
+ * Default: 60 seconds. 0 = disabled (no cooldown).
+ */
+export declare function getIdleNotificationCooldownSeconds(): number;
+/**
+ * Check whether the session-idle notification cooldown has elapsed.
+ * Returns true if the notification should be sent.
+ */
+export declare function shouldSendIdleNotification(stateDir: string, sessionId?: string): boolean;
+/**
+ * Record that the session-idle notification was sent at the current timestamp.
+ */
+export declare function recordIdleNotificationSent(stateDir: string, sessionId?: string): void;
+/**
  * Main persistent mode checker
  * Checks all persistent modes in priority order and returns appropriate action
  */
 export declare function checkPersistentModes(sessionId?: string, directory?: string, stopContext?: StopContext): Promise<PersistentModeResult>;
 /**
- * Create hook output for Claude Code
- * NOTE: Always returns continue: true with soft enforcement via message injection.
- * Never returns continue: false to avoid blocking user intent.
+ * Create hook output for Claude Code.
+ * Returns `continue: false` when `shouldBlock` is true to hard-block the stop event.
+ * Returns `continue: true` for terminal states, escape hatches, and errors.
  */
 export declare function createHookOutput(result: PersistentModeResult): {
     continue: boolean;

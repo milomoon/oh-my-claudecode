@@ -55,7 +55,7 @@ describe('state-tools', () => {
         });
         it('should add _meta field to written state', async () => {
             const result = await stateWriteTool.handler({
-                mode: 'ecomode',
+                mode: 'ralph',
                 state: { someField: 'value' },
                 workingDirectory: TEST_DIR,
             });
@@ -102,8 +102,24 @@ describe('state-tools', () => {
             expect(result.content[0].text).toContain('cleared');
             expect(existsSync(join(sessionDir, 'ralplan-state.json'))).toBe(false);
         });
+        it('should also remove non-session legacy state files during session clear', async () => {
+            const sessionId = 'legacy-cleanup-session';
+            const sessionDir = join(TEST_DIR, '.omc', 'state', 'sessions', sessionId);
+            mkdirSync(sessionDir, { recursive: true });
+            writeFileSync(join(sessionDir, 'ralph-state.json'), JSON.stringify({ active: true, session_id: sessionId }));
+            const legacyRootPath = join(TEST_DIR, '.omc', 'ralph-state.json');
+            writeFileSync(legacyRootPath, JSON.stringify({ active: true, session_id: sessionId }));
+            const result = await stateClearTool.handler({
+                mode: 'ralph',
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('ghost legacy file also removed');
+            expect(existsSync(join(sessionDir, 'ralph-state.json'))).toBe(false);
+            expect(existsSync(legacyRootPath)).toBe(false);
+        });
         it('should clear only the requested session for every execution mode', async () => {
-            const modes = ['autopilot', 'ultrapilot', 'pipeline', 'ralph', 'ultrawork', 'ultraqa', 'ecomode'];
+            const modes = ['autopilot', 'ralph', 'ultrawork', 'ultraqa', 'team'];
             const sessionA = 'session-a';
             const sessionB = 'session-b';
             for (const mode of modes) {
@@ -198,6 +214,50 @@ describe('state-tools', () => {
             expect(result.content[0].text).toContain('Locations cleared: 1');
             expect(result.content[0].text).not.toContain('Errors:');
         });
+        it('should clear skill-active state with session_id (fix for #2118)', async () => {
+            const sessionId = 'test-skill-active-clear';
+            await stateWriteTool.handler({
+                mode: 'skill-active',
+                active: true,
+                state: { skill_name: 'sciomc', reinforcement_count: 2 },
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            // Verify skill-active appears in the active list before clearing
+            const listBefore = await stateListActiveTool.handler({
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            expect(listBefore.content[0].text).toContain('skill-active');
+            const clearResult = await stateClearTool.handler({
+                mode: 'skill-active',
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            expect(clearResult.content[0].text).toContain('cleared');
+            const readResult = await stateReadTool.handler({
+                mode: 'skill-active',
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            // stateReadTool returning "No state found" is authoritative proof the file is gone
+            expect(readResult.content[0].text).toContain('No state found');
+        });
+        it('should list skill-active as active when state file is present', async () => {
+            const sessionId = 'skill-active-list-test';
+            await stateWriteTool.handler({
+                mode: 'skill-active',
+                active: true,
+                state: { skill_name: 'learner' },
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            const result = await stateListActiveTool.handler({
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('skill-active');
+        });
     });
     describe('state_list_active', () => {
         it('should list active modes in current session when session_id provided', async () => {
@@ -239,6 +299,18 @@ describe('state-tools', () => {
                 workingDirectory: TEST_DIR,
             });
             expect(result.content[0].text).toContain('team');
+        });
+        it('should include deep-interview mode when deep-interview state is active', async () => {
+            await stateWriteTool.handler({
+                mode: 'deep-interview',
+                active: true,
+                state: { phase: 'questioning' },
+                workingDirectory: TEST_DIR,
+            });
+            const result = await stateListActiveTool.handler({
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('deep-interview');
         });
         it('should include team in status output when team state is active', async () => {
             await stateWriteTool.handler({
@@ -297,10 +369,11 @@ describe('state-tools', () => {
             });
             expect(result.content[0].text).toContain('active');
         });
-        it('should clear session-specific state without affecting legacy', async () => {
+        it('should clear session-specific state without affecting legacy owned by another session', async () => {
             const sessionId = 'test-session-clear';
-            // Create both legacy and session-scoped state
-            writeFileSync(join(TEST_DIR, '.omc', 'state', 'ralph-state.json'), JSON.stringify({ active: true, source: 'legacy' }));
+            const otherSessionId = 'other-session-owner';
+            // Create legacy state owned by a different session
+            writeFileSync(join(TEST_DIR, '.omc', 'state', 'ralph-state.json'), JSON.stringify({ active: true, source: 'legacy', _meta: { sessionId: otherSessionId } }));
             const sessionDir = join(TEST_DIR, '.omc', 'state', 'sessions', sessionId);
             mkdirSync(sessionDir, { recursive: true });
             writeFileSync(join(sessionDir, 'ralph-state.json'), JSON.stringify({ active: true, source: 'session' }));
@@ -312,8 +385,21 @@ describe('state-tools', () => {
             expect(result.content[0].text).toContain('cleared');
             // Session-scoped file should be gone
             expect(existsSync(join(sessionDir, 'ralph-state.json'))).toBe(false);
-            // Legacy file should remain
+            // Legacy file should remain (belongs to different session)
             expect(existsSync(join(TEST_DIR, '.omc', 'state', 'ralph-state.json'))).toBe(true);
+        });
+        it('should clear recovered session-owned state stranded under another session directory', async () => {
+            const sessionId = 'continued-session';
+            const strandedDir = join(TEST_DIR, '.omc', 'state', 'sessions', 'stale-session-dir');
+            mkdirSync(strandedDir, { recursive: true });
+            writeFileSync(join(strandedDir, 'ralph-state.json'), JSON.stringify({ active: true, session_id: sessionId, source: 'recovered-session-state' }));
+            const result = await stateClearTool.handler({
+                mode: 'ralph',
+                session_id: sessionId,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('recovered session file');
+            expect(existsSync(join(strandedDir, 'ralph-state.json'))).toBe(false);
         });
     });
     describe('session-scoped behavior', () => {
@@ -360,6 +446,61 @@ describe('state-tools', () => {
             });
             const legacyPath = join(TEST_DIR, '.omc', 'state', 'ultrawork-state.json');
             expect(existsSync(legacyPath)).toBe(true);
+        });
+    });
+    describe('payload size validation', () => {
+        it('should reject oversized custom state payloads', async () => {
+            const result = await stateWriteTool.handler({
+                mode: 'ralph',
+                state: { huge: 'x'.repeat(2_000_000) },
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.isError).toBe(true);
+            expect(result.content[0].text).toContain('payload rejected');
+            expect(result.content[0].text).toContain('exceeds maximum');
+        });
+        it('should reject deeply nested custom state payloads', async () => {
+            let obj = { leaf: true };
+            for (let i = 0; i < 15; i++) {
+                obj = { nested: obj };
+            }
+            const result = await stateWriteTool.handler({
+                mode: 'ralph',
+                state: obj,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.isError).toBe(true);
+            expect(result.content[0].text).toContain('nesting depth');
+        });
+        it('should reject state with too many top-level keys', async () => {
+            const state = {};
+            for (let i = 0; i < 150; i++) {
+                state[`key_${i}`] = 'value';
+            }
+            const result = await stateWriteTool.handler({
+                mode: 'ralph',
+                state,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.isError).toBe(true);
+            expect(result.content[0].text).toContain('top-level keys');
+        });
+        it('should still allow normal-sized state writes', async () => {
+            const result = await stateWriteTool.handler({
+                mode: 'ralph',
+                state: { active: true, task: 'normal task', items: [1, 2, 3] },
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('Successfully wrote');
+        });
+        it('should not validate when no custom state is provided', async () => {
+            const result = await stateWriteTool.handler({
+                mode: 'ralph',
+                active: true,
+                iteration: 1,
+                workingDirectory: TEST_DIR,
+            });
+            expect(result.content[0].text).toContain('Successfully wrote');
         });
     });
 });

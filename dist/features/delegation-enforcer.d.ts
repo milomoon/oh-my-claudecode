@@ -6,8 +6,14 @@
  *
  * This solves the problem where Claude Code doesn't automatically apply models
  * from agent definitions - every Task call must explicitly pass the model parameter.
+ *
+ * For non-Claude providers (CC Switch, LiteLLM, etc.), forceInherit is auto-enabled
+ * by the config loader (issue #1201), which causes this enforcer to strip model
+ * parameters so agents inherit the user's configured model instead of receiving
+ * Claude-specific tier names (sonnet/opus/haiku) that the provider won't recognize.
  */
-import type { ModelType } from '../shared/types.js';
+/** Normalize a model ID to a CC-supported alias (sonnet/opus/haiku) if possible */
+export declare function normalizeToCcAlias(model: string): string;
 /**
  * Agent input structure from Claude Agent SDK
  */
@@ -15,7 +21,7 @@ export interface AgentInput {
     description: string;
     prompt: string;
     subagent_type: string;
-    model?: 'sonnet' | 'opus' | 'haiku';
+    model?: string;
     resume?: string;
     run_in_background?: boolean;
 }
@@ -30,7 +36,7 @@ export interface EnforcementResult {
     /** Whether model was auto-injected */
     injected: boolean;
     /** The model that was used */
-    model: ModelType;
+    model: string;
     /** Warning message (only if OMC_DEBUG=true) */
     warning?: string;
 }
@@ -51,10 +57,6 @@ export declare function enforceModel(agentInput: AgentInput): EnforcementResult;
 export declare function isAgentCall(toolName: string, toolInput: unknown): toolInput is AgentInput;
 /**
  * Process a pre-tool-use hook for model enforcement
- *
- * @param toolName - The tool being invoked
- * @param toolInput - The tool input parameters
- * @returns Modified tool input with model enforced, or original if not an agent call
  */
 export declare function processPreToolUse(toolName: string, toolInput: unknown): {
     modifiedInput: unknown;
@@ -62,10 +64,6 @@ export declare function processPreToolUse(toolName: string, toolInput: unknown):
 };
 /**
  * Get model for an agent type (for testing/debugging)
- *
- * @param agentType - The agent type (with or without oh-my-claudecode: prefix)
- * @returns The default model for the agent
- * @throws Error if agent type not found or has no model
  */
-export declare function getModelForAgent(agentType: string): ModelType;
+export declare function getModelForAgent(agentType: string): string;
 //# sourceMappingURL=delegation-enforcer.d.ts.map

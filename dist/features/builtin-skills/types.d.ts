@@ -5,6 +5,7 @@
  *
  * Adapted from oh-my-opencode's builtin-skills feature.
  */
+import type { SkillPipelineMetadata } from '../../utils/skill-pipeline.js';
 /**
  * Configuration for MCP server integration with a skill
  */
@@ -21,6 +22,14 @@ export interface SkillMcpConfig {
 export interface BuiltinSkill {
     /** Unique skill name */
     name: string;
+    /** Aliases available for canonical skill entries */
+    aliases?: string[];
+    /** Canonical skill name when this entry is an alias */
+    aliasOf?: string;
+    /** Whether this entry is a deprecated compatibility alias */
+    deprecatedAlias?: boolean;
+    /** Human-readable deprecation guidance */
+    deprecationMessage?: string;
     /** Short description of the skill */
     description: string;
     /** Full template content for the skill */
@@ -41,6 +50,8 @@ export interface BuiltinSkill {
     subtask?: boolean;
     /** Hint for arguments (optional) */
     argumentHint?: string;
+    /** Optional skill-to-skill pipeline metadata */
+    pipeline?: SkillPipelineMetadata;
     /** MCP server configuration (optional) */
     mcpConfig?: SkillMcpConfig;
 }

@@ -72,10 +72,26 @@ export interface StopContext {
     end_turn_reason?: string;
     /** End turn reason (from API) - camelCase variant */
     endTurnReason?: string;
+    /** Generic reason field from some stop-hook payloads */
+    reason?: string;
     /** Whether user explicitly requested stop - snake_case variant */
     user_requested?: boolean;
     /** Whether user explicitly requested stop - camelCase variant */
     userRequested?: boolean;
+    /** Prompt text (when available) */
+    prompt?: string;
+    /** Tool name from hook payload (snake_case) */
+    tool_name?: string;
+    /** Tool name from hook payload (camelCase) */
+    toolName?: string;
+    /** Tool input from hook payload (snake_case) */
+    tool_input?: unknown;
+    /** Tool input from hook payload (camelCase) */
+    toolInput?: unknown;
+    /** Transcript path from hook payload (snake_case) */
+    transcript_path?: string;
+    /** Transcript path from hook payload (camelCase) */
+    transcriptPath?: string;
 }
 export interface TodoContinuationHook {
     checkIncomplete: (sessionId?: string) => Promise<IncompleteTodosResult>;
@@ -102,6 +118,13 @@ export interface TodoContinuationHook {
  */
 export declare function isUserAbort(context?: StopContext): boolean;
 /**
+ * Detect explicit /cancel command paths that should bypass stop-hook reinforcement.
+ *
+ * This is stricter than generic user-abort detection and is intended to prevent
+ * re-enforcement races when the user explicitly invokes /cancel or /cancel --force.
+ */
+export declare function isExplicitCancelCommand(context?: StopContext): boolean;
+/**
  * Detect if stop was triggered by context-limit related reasons.
  * When context is exhausted, Claude Code needs to stop so it can compact.
  * Blocking these stops causes a deadlock: can't compact because can't stop,
@@ -110,6 +133,28 @@ export declare function isUserAbort(context?: StopContext): boolean;
  * See: https://github.com/Yeachan-Heo/oh-my-claudecode/issues/213
  */
 export declare function isContextLimitStop(context?: StopContext): boolean;
+/**
+ * Detect if stop was triggered by rate limiting (HTTP 429 / quota exhausted).
+ * When the API is rate-limited, Claude Code stops the session.
+ * Blocking these stops causes an infinite retry loop: the persistent-mode hook
+ * injects a continuation prompt, Claude immediately hits the rate limit again,
+ * stops again, and the cycle repeats indefinitely.
+ *
+ * Fix for: https://github.com/Yeachan-Heo/oh-my-claudecode/issues/777
+ */
+export declare function isRateLimitStop(context?: StopContext): boolean;
+/**
+ * Auth-related stop reasons that should bypass continuation re-enforcement.
+ * Keep exactly 16 entries in sync with script/template variants.
+ */
+export declare const AUTHENTICATION_ERROR_PATTERNS: readonly ["authentication_error", "authentication_failed", "auth_error", "unauthorized", "unauthorised", "401", "403", "forbidden", "invalid_token", "token_invalid", "token_expired", "expired_token", "oauth_expired", "oauth_token_expired", "invalid_grant", "insufficient_scope"];
+/**
+ * Detect if stop was triggered by authentication/authorization failures.
+ * Auth failures should not re-trigger persistent continuation loops.
+ *
+ * Fix for: issue #1308
+ */
+export declare function isAuthenticationError(context?: StopContext): boolean;
 /**
  * Get the Task directory for a session
  *

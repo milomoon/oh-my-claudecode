@@ -6,12 +6,20 @@
  * Receives stdin JSON from Claude Code and outputs formatted statusline.
  */
 
-import { readStdin, getContextPercent, getModelName } from "./stdin.js";
+import {
+  readStdin,
+  writeStdinCache,
+  readStdinCache,
+  getContextPercent,
+  getModelName,
+  stabilizeContextPercent,
+} from "./stdin.js";
 import { parseTranscript } from "./transcript.js";
 import {
   readHudState,
   readHudConfig,
   getRunningTasks,
+  writeHudState,
   initializeHUDState,
 } from "./state.js";
 import {
@@ -21,334 +29,398 @@ import {
   readAutopilotStateForHud,
 } from "./omc-state.js";
 import { getUsage } from "./usage-api.js";
+import { executeCustomProvider } from "./custom-rate-provider.js";
 import { render } from "./render.js";
+import { detectApiKeySource } from "./elements/api-key-source.js";
+import { refreshMissionBoardState } from "./mission-board.js";
 import { sanitizeOutput } from "./sanitize.js";
 import type {
   HudRenderContext,
   SessionHealth,
-  StatuslineStdin,
+  SessionSummaryState,
 } from "./types.js";
+import { getRuntimePackageVersion } from "../lib/version.js";
+import { compareVersions } from "../features/auto-update.js";
 import {
-  extractTokens,
-  createSnapshot,
-  type TokenSnapshot,
-} from "../analytics/token-extractor.js";
-import { extractSessionId } from "../analytics/output-estimator.js";
-import { getTokenTracker } from "../analytics/token-tracker.js";
-
-// Persistent token snapshot for delta calculations
-let previousSnapshot: TokenSnapshot | null = null;
+  resolveToWorktreeRoot,
+  resolveTranscriptPath,
+} from "../lib/worktree-paths.js";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { access, readFile } from "fs/promises";
+import { join, basename, dirname } from "path";
+import { homedir } from "os";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+import { getOmcRoot } from "../lib/worktree-paths.js";
+import { getClaudeConfigDir } from "../utils/paths.js";
 
 /**
- * Record token usage to analytics tracker.
- * Silent failure - doesn't break HUD rendering.
+ * Extract session ID (UUID) from a transcript path.
  */
-async function recordTokenUsage(
-  stdin: any,
-  transcriptData: any,
-): Promise<void> {
-  try {
-    // Debug: Log stdin.context_window data
-    if (process.env.OMC_DEBUG) {
-      console.error(
-        "[TokenRecording] stdin.context_window:",
-        JSON.stringify(stdin.context_window),
-      );
-    }
-
-    // Get model name from stdin
-    const modelName = getModelName(stdin);
-
-    // Get running agents from transcript
-    const runningAgents =
-      transcriptData.agents?.filter((a: any) => a.status === "running") ?? [];
-    const agentName =
-      runningAgents.length > 0 ? runningAgents[0].name : undefined;
-
-    if (process.env.OMC_DEBUG) {
-      console.error("[TokenRecording] agentName determined:", agentName);
-    }
-
-    // Extract tokens (delta from previous)
-    const extracted = extractTokens(
-      stdin,
-      previousSnapshot,
-      modelName,
-      agentName,
-    );
-
-    if (process.env.OMC_DEBUG) {
-      console.error("[TokenRecording] extracted tokens:", {
-        inputTokens: extracted.inputTokens,
-        outputTokens: extracted.outputTokens,
-        cacheCreationTokens: extracted.cacheCreationTokens,
-        cacheReadTokens: extracted.cacheReadTokens,
-        agentName: extracted.agentName,
-        modelName: extracted.modelName,
-      });
-    }
-
-    // Only record if there's actual token usage
-    if (extracted.inputTokens > 0 || extracted.cacheCreationTokens > 0) {
-      if (process.env.OMC_DEBUG) {
-        console.error(
-          "[TokenRecording] Recording condition PASSED - recording usage",
-        );
-      }
-
-      // Get session ID
-      const sessionId = extractSessionId(stdin.transcript_path);
-
-      // Get tracker and record
-      const tracker = getTokenTracker(sessionId);
-      await tracker.recordTokenUsage({
-        agentName: extracted.agentName,
-        modelName: extracted.modelName,
-        inputTokens: extracted.inputTokens,
-        outputTokens: extracted.outputTokens,
-        cacheCreationTokens: extracted.cacheCreationTokens,
-        cacheReadTokens: extracted.cacheReadTokens,
-      });
-
-      if (process.env.OMC_DEBUG) {
-        console.error(
-          "[TokenRecording] Successfully recorded usage for agent:",
-          extracted.agentName,
-        );
-      }
-    } else {
-      if (process.env.OMC_DEBUG) {
-        console.error(
-          "[TokenRecording] Recording condition FAILED - no token delta detected",
-        );
-      }
-    }
-
-    // Update snapshot for next render
-    previousSnapshot = createSnapshot(stdin);
-  } catch (error) {
-    // Silent failure - don't break HUD rendering
-    if (process.env.OMC_DEBUG) {
-      console.error("[Analytics] Token recording failed:", error);
-    }
-  }
+function extractSessionIdFromPath(transcriptPath: string): string | null {
+  if (!transcriptPath) return null;
+  const match = transcriptPath.match(/([0-9a-f-]{36})(?:\.jsonl)?$/i);
+  return match ? match[1] : null;
 }
 
 /**
- * Fallback: compute session analytics from in-memory TokenTracker stats.
- * Used when loadAnalyticsFast() returns null or throws.
- *
- * NOTE: This works because recordTokenUsage() is called BEFORE calculateSessionHealth()
- * in main() (line 167 before line 203). The first call to getTokenTracker(sessionId)
- * creates the singleton with the correct sessionId and populates it. Subsequent calls
- * get the same instance regardless of the sessionId parameter (see token-tracker.ts:274-278).
- * DO NOT reorder recordTokenUsage/calculateSessionHealth in main().
- *
- * @returns Analytics fields or null if no token data available
+ * Read cached session summary from state directory.
  */
-async function getTokenTrackerFallback(
+function readSessionSummary(
+  stateDir: string,
   sessionId: string,
-  durationMs: number,
-): Promise<{
-  sessionCost: number;
-  totalTokens: number;
-  cacheHitRate: number;
-  costPerHour: number;
-} | null> {
-  const tracker = getTokenTracker(sessionId);
-  const stats = tracker.getSessionStats();
-
-  if (stats.totalInputTokens === 0 && stats.totalCacheCreation === 0) {
+): SessionSummaryState | null {
+  const statePath = join(stateDir, `session-summary-${sessionId}.json`);
+  if (!existsSync(statePath)) return null;
+  try {
+    return JSON.parse(readFileSync(statePath, "utf-8"));
+  } catch {
     return null;
   }
-
-  const { calculateCost } = await import("../analytics/cost-estimator.js");
-
-  let cost = 0;
-  for (const [model, usages] of Object.entries(stats.byModel)) {
-    for (const usage of usages) {
-      const c = calculateCost({
-        modelName: model,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheCreationTokens: usage.cacheCreationTokens,
-        cacheReadTokens: usage.cacheReadTokens,
-      });
-      cost += c.totalCost;
-    }
-  }
-
-  const totalTokens = stats.totalInputTokens + stats.totalOutputTokens;
-  const totalInput = stats.totalInputTokens + stats.totalCacheCreation + stats.totalCacheRead;
-  const cacheHitRate =
-    totalInput > 0 ? (stats.totalCacheRead / totalInput) * 100 : 0;
-  const hours = durationMs / (1000 * 60 * 60);
-  const costPerHour = hours > 0 ? cost / hours : 0;
-
-  return { sessionCost: cost, totalTokens, cacheHitRate, costPerHour };
 }
 
 /**
- * Calculate session health from session start time and LIVE stdin data.
- * Uses stdin's current_usage for real-time token display.
+ * Track the timestamp of the last spawned session-summary process to prevent
+ * unbounded accumulation of detached processes when summarization takes >60s.
+ */
+let lastSummarySpawnTimestamp = 0;
+
+/**
+ * Track the PID of the spawned session-summary child process.
+ * Before spawning a new process, we check if this PID is still alive
+ * using process.kill(pid, 0). This prevents process accumulation even
+ * when summarization runs longer than the timestamp-based throttle window.
+ */
+let summaryProcessPid: number | null = null;
+
+/** @internal Reset spawn guard — used by tests only. */
+export function _resetSummarySpawnTimestamp(): void {
+  lastSummarySpawnTimestamp = 0;
+  summaryProcessPid = null;
+}
+
+/** @internal Get the tracked summary process PID — used by tests only. */
+export function _getSummaryProcessPid(): number | null {
+  return summaryProcessPid;
+}
+
+/**
+ * Spawn the session-summary script in the background to generate/update summary.
+ * Fire-and-forget: does not block HUD rendering.
+ * Guards against duplicate spawns by tracking the last spawn timestamp.
+ */
+function spawnSessionSummaryScript(
+  transcriptPath: string,
+  stateDir: string,
+  sessionId: string,
+): void {
+  // Check if a previously spawned summary process is still alive.
+  // This prevents accumulation of detached processes when summarization
+  // takes longer than the timestamp-based throttle window.
+  if (summaryProcessPid !== null) {
+    try {
+      process.kill(summaryProcessPid, 0);
+      // Process is still alive — skip spawning a new one
+      return;
+    } catch {
+      // Process is dead (ESRCH) — clear PID and allow respawn
+      summaryProcessPid = null;
+    }
+  }
+
+  // Secondary guard: prevent rapid re-spawns via timestamp (within 120s).
+  const now = Date.now();
+  if (now - lastSummarySpawnTimestamp < 120_000) {
+    return;
+  }
+  lastSummarySpawnTimestamp = now;
+  // Resolve the script path relative to this file's location
+  // In compiled output: dist/hud/index.js -> ../../scripts/session-summary.mjs
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  const scriptPath = join(
+    thisDir,
+    "..",
+    "..",
+    "scripts",
+    "session-summary.mjs",
+  );
+
+  if (!existsSync(scriptPath)) {
+    if (process.env.OMC_DEBUG) {
+      console.error("[HUD] session-summary script not found:", scriptPath);
+    }
+    return;
+  }
+
+  try {
+    const child = spawn(
+      "node",
+      [scriptPath, transcriptPath, stateDir, sessionId],
+      {
+        stdio: "ignore",
+        detached: true,
+        env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "session-summary" },
+      },
+    );
+    summaryProcessPid = child.pid ?? null;
+    child.unref();
+  } catch (error) {
+    summaryProcessPid = null;
+    if (process.env.OMC_DEBUG) {
+      console.error(
+        "[HUD] Failed to spawn session-summary:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+}
+
+/**
+ * Calculate session health from session start time and context usage.
  */
 async function calculateSessionHealth(
   sessionStart: Date | undefined,
   contextPercent: number,
-  stdin: StatuslineStdin,
 ): Promise<SessionHealth | null> {
-  // Calculate duration (use 0 if no session start)
   const durationMs = sessionStart ? Date.now() - sessionStart.getTime() : 0;
   const durationMinutes = Math.floor(durationMs / 60_000);
-
   let health: SessionHealth["health"] = "healthy";
-  if (durationMinutes > 120 || contextPercent > 85) {
-    health = "critical";
-  } else if (durationMinutes > 60 || contextPercent > 70) {
-    health = "warning";
-  }
+  if (durationMinutes > 120 || contextPercent > 85) health = "critical";
+  else if (durationMinutes > 60 || contextPercent > 70) health = "warning";
+  return { durationMinutes, messageCount: 0, health };
+}
 
-  // Get LIVE token data from stdin (not from analytics files)
-  const usage = stdin.context_window?.current_usage;
-  const inputTokens = usage?.input_tokens ?? 0;
-  const cacheCreationTokens = usage?.cache_creation_input_tokens ?? 0;
-  const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
+/**
+ * Show installation diagnostic when called from CLI without stdin.
+ * Helps users verify HUD setup after omc-setup.
+ */
+function showDiagnostic(): void {
+  const version = getRuntimePackageVersion();
+  const configDir = getClaudeConfigDir();
+  const hudScript = join(configDir, "hud", "omc-hud.mjs");
+  const settingsFile = join(configDir, "settings.json");
 
-  // Debug: log token data if OMC_DEBUG is set
-  if (process.env.OMC_DEBUG) {
-    console.error("[HUD DEBUG] current_usage:", JSON.stringify(usage));
-    console.error("[HUD DEBUG] tokens:", {
-      inputTokens,
-      cacheCreationTokens,
-      cacheReadTokens,
-    });
-  }
-
-  // Calculate totals from live data
-  const totalTokens = inputTokens + cacheCreationTokens + cacheReadTokens;
-  const totalInputForCache = inputTokens + cacheCreationTokens;
-  const cacheHitRate =
-    totalInputForCache > 0
-      ? (cacheReadTokens / (totalInputForCache + cacheReadTokens)) * 100
-      : 0;
-
-  // Estimate output tokens and cost
-  let sessionCost = 0;
-  let costPerHour = 0;
-  const isEstimated = true;
-
+  const hudExists = existsSync(hudScript);
+  let statusLineOk = false;
   try {
-    const { calculateCost } = await import("../analytics/cost-estimator.js");
-    const { estimateOutputTokens } =
-      await import("../analytics/output-estimator.js");
-
-    const modelName =
-      stdin.model?.id ?? stdin.model?.display_name ?? "claude-sonnet-4.5";
-    const estimatedOutput = estimateOutputTokens(inputTokens, modelName);
-
-    const costResult = calculateCost({
-      modelName,
-      inputTokens,
-      outputTokens: estimatedOutput,
-      cacheCreationTokens,
-      cacheReadTokens,
-    });
-
-    sessionCost = costResult.totalCost;
-
-    // Calculate cost per hour
-    const hours = durationMs / (1000 * 60 * 60);
-    costPerHour = hours > 0 ? sessionCost / hours : 0;
-
-    // Adjust health based on cost (Budget warnings)
-    if (sessionCost > 5.0) {
-      health = "critical";
-    } else if (sessionCost > 2.0 && health !== "critical") {
-      health = "warning";
+    const settings = JSON.parse(readFileSync(settingsFile, "utf-8"));
+    const sl = settings.statusLine;
+    if (sl && typeof sl === "object" && typeof (sl as Record<string, unknown>).command === "string") {
+      statusLineOk = ((sl as Record<string, unknown>).command as string).includes("omc-hud");
+    } else if (typeof sl === "string") {
+      statusLineOk = sl.includes("omc-hud");
     }
-  } catch (error) {
-    if (process.env.OMC_DEBUG) {
-      console.error("[HUD] Cost calculation failed:", error);
-    }
-    // Cost calculation failed - continue with zeros
+  } catch {
+    /* settings.json missing or invalid */
   }
 
-  // Get top agents from tracker
-  let topAgents: Array<{ agent: string; cost: number }> = [];
-  try {
-    const sessionId = extractSessionId(stdin.transcript_path);
-    if (sessionId) {
-      const tracker = getTokenTracker(sessionId);
-      const agents = await tracker.getTopAgents(3);
-      topAgents = agents.map((a) => ({ agent: a.agent, cost: a.cost }));
-    }
-  } catch (error) {
-    if (process.env.OMC_DEBUG) {
-      console.error("[HUD] Top agents fetch failed:", error);
-    }
-    // Top agents fetch failed - continue with empty
-  }
+  const config = readHudConfig();
+  const preset = config.preset ?? "focused";
 
-  return {
-    durationMinutes,
-    messageCount: 0,
-    health,
-    sessionCost,
-    totalTokens,
-    cacheHitRate,
-    topAgents,
-    costPerHour,
-    isEstimated,
-  };
+  console.log(`[OMC] HUD v${version} | preset: ${preset}`);
+  console.log(`  HUD script:  ${hudExists ? "installed" : "MISSING"}`);
+  console.log(`  statusLine:  ${statusLineOk ? "configured" : "NOT configured"}`);
+
+  if (!hudExists || !statusLineOk) {
+    console.log("  Run /oh-my-claudecode:hud setup to fix.");
+  } else {
+    console.log("  HUD renders automatically inside Claude Code sessions.");
+  }
 }
 
 /**
  * Main HUD entry point
+ * @param watchMode - true when called from the --watch polling loop (stdin is TTY)
  */
-async function main(): Promise<void> {
+async function main(watchMode = false, skipInit = false): Promise<void> {
   try {
-    // Initialize HUD state (cleanup stale/orphaned tasks)
-    await initializeHUDState();
-
     // Read stdin from Claude Code
-    const stdin = await readStdin();
+    const previousStdinCache = readStdinCache();
+    let stdin = await readStdin();
 
-    if (!stdin) {
-      // No stdin - suggest setup
-      console.log("[OMC] run /omc-setup to install properly");
+    if (stdin) {
+      stdin = stabilizeContextPercent(stdin, previousStdinCache);
+      // Persist for --watch mode so it can read data when stdin is a TTY
+      writeStdinCache(stdin);
+    } else if (watchMode) {
+      // In watch mode stdin is always a TTY; fall back to last cached value
+      stdin = previousStdinCache;
+      if (!stdin) {
+        // Cache not yet populated (first poll before statusline fires)
+        console.log("[OMC] Starting...");
+        return;
+      }
+    } else {
+      // CLI invocation (TTY, no stdin) — show installation diagnostic
+      showDiagnostic();
       return;
     }
 
-    const cwd = stdin.cwd || process.cwd();
+    const cwd = resolveToWorktreeRoot(stdin.cwd || undefined);
+
+    // Initialize HUD state (cleanup stale/orphaned tasks)
+    // Must happen after cwd resolution so cleanup targets the correct project directory
+    if (!skipInit) {
+      await initializeHUDState(cwd);
+    }
 
     // Read configuration (before transcript parsing so we can use staleTaskThresholdMinutes)
-    const config = readHudConfig();
+    // Clone to avoid mutating shared DEFAULT_HUD_CONFIG when applying runtime width detection
+    const config = { ...readHudConfig() };
+
+    // Auto-detect terminal width if not explicitly configured (#1726)
+    // Prefer live TTY columns (responds to resize) over static COLUMNS env var
+    if (config.maxWidth === undefined) {
+      const cols =
+        process.stderr.columns ||
+        process.stdout.columns ||
+        parseInt(process.env.COLUMNS ?? "0", 10) ||
+        0;
+      if (cols > 0) {
+        config.maxWidth = cols;
+        if (!config.wrapMode) config.wrapMode = "wrap";
+      }
+    }
+
+    // Resolve worktree-mismatched transcript paths (issue #1094)
+    const resolvedTranscriptPath = resolveTranscriptPath(
+      stdin.transcript_path,
+      cwd,
+    );
 
     // Parse transcript for agents and todos
-    const transcriptData = await parseTranscript(stdin.transcript_path, {
+    const transcriptData = await parseTranscript(resolvedTranscriptPath, {
       staleTaskThresholdMinutes: config.staleTaskThresholdMinutes,
     });
 
-    // Record token usage (auto-tracking)
-    await recordTokenUsage(stdin, transcriptData);
+    const currentSessionId = extractSessionIdFromPath(
+      resolvedTranscriptPath ?? stdin.transcript_path ?? "",
+    );
 
     // Read OMC state files
-    const ralph = readRalphStateForHud(cwd);
-    const ultrawork = readUltraworkStateForHud(cwd);
+    const ralph = readRalphStateForHud(cwd, currentSessionId ?? undefined);
+    const ultrawork = readUltraworkStateForHud(
+      cwd,
+      currentSessionId ?? undefined,
+    );
     const prd = readPrdStateForHud(cwd);
-    const autopilot = readAutopilotStateForHud(cwd);
+    const autopilot = readAutopilotStateForHud(
+      cwd,
+      currentSessionId ?? undefined,
+    );
 
     // Read HUD state for background tasks
     const hudState = readHudState(cwd);
-    const backgroundTasks = hudState?.backgroundTasks || [];
+    const _backgroundTasks = hudState?.backgroundTasks || [];
+
+    // Persist session start time to survive tail-parsing resets (#528)
+    // When tail parsing kicks in for large transcripts, sessionStart comes from
+    // the first entry in the tail chunk rather than the actual session start.
+    // We persist the real start time in HUD state on first observation.
+    // Scoped per session ID so a new session in the same cwd resets the timestamp.
+    let sessionStart = transcriptData.sessionStart;
+    const sameSession = hudState?.sessionId === currentSessionId;
+    if (sameSession && hudState?.sessionStartTimestamp) {
+      // Use persisted value (the real session start) - but validate first
+      const persisted = new Date(hudState.sessionStartTimestamp);
+      if (!isNaN(persisted.getTime())) {
+        sessionStart = persisted;
+      }
+      // If invalid, fall through to transcript-derived sessionStart
+    } else if (sessionStart) {
+      // First time seeing session start (or new session) - persist it
+      const stateToWrite = hudState || {
+        timestamp: new Date().toISOString(),
+        backgroundTasks: [],
+      };
+      stateToWrite.sessionStartTimestamp = sessionStart.toISOString();
+      stateToWrite.sessionId = currentSessionId ?? undefined;
+      stateToWrite.timestamp = new Date().toISOString();
+      writeHudState(stateToWrite, cwd);
+    }
 
     // Fetch rate limits from OAuth API (if available)
-    const rateLimits =
+    const rateLimitsResult =
       config.elements.rateLimits !== false ? await getUsage() : null;
+
+    // Fetch custom rate limit buckets (if configured)
+    const customBuckets =
+      config.rateLimitsProvider?.type === "custom"
+        ? await executeCustomProvider(config.rateLimitsProvider)
+        : null;
+
+    // Read OMC version and update check cache
+    let omcVersion: string | null = null;
+    let updateAvailable: string | null = null;
+    try {
+      omcVersion = getRuntimePackageVersion();
+      if (omcVersion === "unknown") omcVersion = null;
+    } catch (error) {
+      // Ignore version detection errors
+      if (process.env.OMC_DEBUG) {
+        console.error(
+          "[HUD] Version detection error:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+    // Async file read to avoid blocking event loop (Issue #1273)
+    try {
+      const updateCacheFile = join(homedir(), ".omc", "update-check.json");
+      await access(updateCacheFile);
+      const content = await readFile(updateCacheFile, "utf-8");
+      const cached = JSON.parse(content);
+      if (
+        cached?.latestVersion &&
+        omcVersion &&
+        compareVersions(omcVersion, cached.latestVersion) < 0
+      ) {
+        updateAvailable = cached.latestVersion;
+      }
+    } catch (error) {
+      // Ignore update cache read errors - expected if file doesn't exist yet
+      if (process.env.OMC_DEBUG) {
+        console.error(
+          "[HUD] Update cache read error:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+
+    // Session summary: read cached state and trigger background regeneration if needed
+    let sessionSummary: SessionSummaryState | null = null;
+    const sessionSummaryEnabled = config.elements.sessionSummary ?? false;
+    if (sessionSummaryEnabled && resolvedTranscriptPath && currentSessionId) {
+      const omcStateDir = join(getOmcRoot(cwd), "state");
+      sessionSummary = readSessionSummary(omcStateDir, currentSessionId);
+
+      // Debounce: only spawn script if cache is absent or older than 60 seconds.
+      // This prevents spawning a child process on every HUD poll (every ~1s).
+      // The child script still checks turn-count freshness internally.
+      const shouldSpawn =
+        !sessionSummary?.generatedAt ||
+        Date.now() - new Date(sessionSummary.generatedAt).getTime() > 60_000;
+
+      if (shouldSpawn) {
+        spawnSessionSummaryScript(
+          resolvedTranscriptPath,
+          omcStateDir,
+          currentSessionId,
+        );
+      }
+    }
+
+    const missionBoardEnabled =
+      config.missionBoard?.enabled ?? config.elements.missionBoard ?? false;
+    const missionBoard = missionBoardEnabled
+      ? await refreshMissionBoardState(cwd, config.missionBoard)
+      : null;
+    const contextPercent = getContextPercent(stdin);
 
     // Build render context
     const context: HudRenderContext = {
-      contextPercent: getContextPercent(stdin),
+      contextPercent,
+      contextDisplayScope: currentSessionId ?? cwd,
       modelName: getModelName(stdin),
       ralph,
       ultrawork,
@@ -358,15 +430,31 @@ async function main(): Promise<void> {
       todos: transcriptData.todos,
       backgroundTasks: getRunningTasks(hudState),
       cwd,
+      missionBoard,
       lastSkill: transcriptData.lastActivatedSkill || null,
-      rateLimits,
+      rateLimitsResult,
+      customBuckets,
       pendingPermission: transcriptData.pendingPermission || null,
       thinkingState: transcriptData.thinkingState || null,
-      sessionHealth: await calculateSessionHealth(
-        transcriptData.sessionStart,
-        getContextPercent(stdin),
-        stdin,
-      ),
+      sessionHealth: await calculateSessionHealth(sessionStart, contextPercent),
+      lastRequestTokenUsage: transcriptData.lastRequestTokenUsage || null,
+      sessionTotalTokens: transcriptData.sessionTotalTokens ?? null,
+      omcVersion,
+      updateAvailable,
+      toolCallCount: transcriptData.toolCallCount,
+      agentCallCount: transcriptData.agentCallCount,
+      skillCallCount: transcriptData.skillCallCount,
+      promptTime: hudState?.lastPromptTimestamp
+        ? new Date(hudState.lastPromptTimestamp)
+        : null,
+      apiKeySource: config.elements.apiKeySource
+        ? detectApiKeySource(cwd)
+        : null,
+      profileName: process.env.CLAUDE_CONFIG_DIR
+        ? basename(process.env.CLAUDE_CONFIG_DIR).replace(/^\./, "")
+        : null,
+      sessionSummary,
+      lastToolName: transcriptData.lastToolName,
     };
 
     // Debug: log data if OMC_DEBUG is set
@@ -381,13 +469,51 @@ async function main(): Promise<void> {
       );
     }
 
+    // autoCompact: write trigger file when context exceeds threshold
+    // A companion hook can read this file to inject a /compact suggestion.
+    if (
+      config.contextLimitWarning.autoCompact &&
+      context.contextPercent >= config.contextLimitWarning.threshold
+    ) {
+      try {
+        const omcStateDir = join(getOmcRoot(cwd), "state");
+        mkdirSync(omcStateDir, { recursive: true });
+        const triggerFile = join(omcStateDir, "compact-requested.json");
+        writeFileSync(
+          triggerFile,
+          JSON.stringify({
+            requestedAt: new Date().toISOString(),
+            contextPercent: context.contextPercent,
+            threshold: config.contextLimitWarning.threshold,
+          }),
+        );
+      } catch (error) {
+        // Silent failure — don't break HUD rendering
+        if (process.env.OMC_DEBUG) {
+          console.error(
+            "[HUD] Auto-compact trigger write error:",
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
+    }
+
     // Render and output
     let output = await render(context, config);
 
     // Apply safe mode sanitization if enabled (Issue #346)
     // This strips ANSI codes and uses ASCII-only output to prevent
-    // terminal rendering corruption during concurrent updates
-    if (config.elements.safeMode) {
+    // terminal rendering corruption during concurrent updates.
+    // On Windows, default to safe mode unless the user explicitly sets safeMode: false
+    // (e.g. Windows Terminal and modern terminals support ANSI natively).
+    // The win32 fallback is retained for configs that omit safeMode entirely
+    // (before default merge, e.g. minimal config files or future schema changes).
+    // explicit false overrides platform detection: process.platform === 'win32'
+    const useSafeMode =
+      config.elements.safeMode !== false &&
+      (config.elements.safeMode || process.platform === "win32");
+
+    if (useSafeMode) {
       output = sanitizeOutput(output);
       // In safe mode, use regular spaces (don't convert to non-breaking)
       console.log(output);
@@ -418,5 +544,8 @@ async function main(): Promise<void> {
   }
 }
 
-// Run main
+// Export for programmatic use (e.g., omc hud --watch loop)
+export { main };
+
+// Auto-run (unconditional so dynamic import() via omc-hud.mjs wrapper works correctly)
 main();

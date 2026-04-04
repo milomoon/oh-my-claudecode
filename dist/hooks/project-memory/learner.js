@@ -2,10 +2,28 @@
  * Project Memory Learner
  * Incrementally learns from PostToolUse events
  */
-import { loadProjectMemory, saveProjectMemory } from './storage.js';
+import { loadProjectMemory, saveProjectMemory, withProjectMemoryLock } from './storage.js';
 import { BUILD_COMMAND_PATTERNS, TEST_COMMAND_PATTERNS } from './constants.js';
 import { trackAccess } from './hot-path-tracker.js';
 import { detectDirectivesFromMessage, addDirective } from './directive-detector.js';
+/**
+ * Per-projectRoot async mutex to prevent concurrent load-modify-save races.
+ * Maps projectRoot -> promise chain tail.
+ */
+const writeMutexes = new Map();
+/**
+ * Acquire a promise-chain mutex for a projectRoot.
+ * Chains the new operation onto the tail of the existing chain.
+ * Times out after 5 seconds to prevent infinite blocking.
+ */
+function withMutex(projectRoot, fn) {
+    const prev = writeMutexes.get(projectRoot) ?? Promise.resolve();
+    const next = prev.then(() => fn()).catch(() => fn());
+    // Store the chain tail without the result so callers don't chain errors forward
+    const tail = next.then(() => { }, () => { });
+    writeMutexes.set(projectRoot, tail);
+    return next;
+}
 /**
  * Learn from tool output and update project memory
  *
@@ -16,87 +34,92 @@ import { detectDirectivesFromMessage, addDirective } from './directive-detector.
  * @param userMessage - Optional user message for directive detection
  */
 export async function learnFromToolOutput(toolName, toolInput, toolOutput, projectRoot, userMessage) {
-    // Learn from multiple tool types
-    const memory = await loadProjectMemory(projectRoot);
-    if (!memory) {
-        return;
-    }
-    let updated = false;
-    // Track file accesses from Read/Edit/Write tools
-    if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') {
-        const filePath = toolInput?.file_path || toolInput?.filePath;
-        if (filePath) {
-            memory.hotPaths = trackAccess(memory.hotPaths, filePath, projectRoot, 'file');
-            updated = true;
-        }
-    }
-    // Track directory accesses from Glob/Grep
-    if (toolName === 'Glob' || toolName === 'Grep') {
-        const dirPath = toolInput?.path;
-        if (dirPath) {
-            memory.hotPaths = trackAccess(memory.hotPaths, dirPath, projectRoot, 'directory');
-            updated = true;
-        }
-    }
-    // Detect directives from user messages
-    if (userMessage) {
-        const detectedDirectives = detectDirectivesFromMessage(userMessage);
-        for (const directive of detectedDirectives) {
-            memory.userDirectives = addDirective(memory.userDirectives, directive);
-            updated = true;
-        }
-    }
-    // Learn from Bash commands
-    if (toolName !== 'Bash') {
-        if (updated) {
-            await saveProjectMemory(projectRoot, memory);
-        }
-        return;
-    }
-    const command = toolInput?.command || '';
-    if (!command) {
-        return;
-    }
-    try {
-        // Detect and store build commands
-        if (isBuildCommand(command)) {
-            if (!memory.build.buildCommand || memory.build.buildCommand !== command) {
-                memory.build.buildCommand = command;
-                updated = true;
+    return withMutex(projectRoot, async () => {
+        // Cross-process file lock for safe concurrent access
+        await withProjectMemoryLock(projectRoot, async () => {
+            // Learn from multiple tool types
+            const memory = await loadProjectMemory(projectRoot);
+            if (!memory) {
+                return;
             }
-        }
-        // Detect and store test commands
-        if (isTestCommand(command)) {
-            if (!memory.build.testCommand || memory.build.testCommand !== command) {
-                memory.build.testCommand = command;
-                updated = true;
-            }
-        }
-        // Extract environment hints from output
-        const hints = extractEnvironmentHints(toolOutput);
-        if (hints.length > 0) {
-            for (const hint of hints) {
-                // Only add if not already present
-                const exists = memory.customNotes.some(n => n.category === hint.category && n.content === hint.content);
-                if (!exists) {
-                    memory.customNotes.push(hint);
+            let updated = false;
+            // Track file accesses from Read/Edit/Write tools
+            if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') {
+                const filePath = toolInput?.file_path || toolInput?.filePath;
+                if (filePath) {
+                    memory.hotPaths = trackAccess(memory.hotPaths, filePath, projectRoot, 'file');
                     updated = true;
                 }
             }
-            // Limit custom notes to 20 entries
-            if (memory.customNotes.length > 20) {
-                memory.customNotes = memory.customNotes.slice(-20);
+            // Track directory accesses from Glob/Grep
+            if (toolName === 'Glob' || toolName === 'Grep') {
+                const dirPath = toolInput?.path;
+                if (dirPath) {
+                    memory.hotPaths = trackAccess(memory.hotPaths, dirPath, projectRoot, 'directory');
+                    updated = true;
+                }
             }
-        }
-        // Save if updated
-        if (updated) {
-            await saveProjectMemory(projectRoot, memory);
-        }
-    }
-    catch (error) {
-        // Silently fail
-        console.error('Error learning from tool output:', error);
-    }
+            // Detect directives from user messages
+            if (userMessage) {
+                const detectedDirectives = detectDirectivesFromMessage(userMessage);
+                for (const directive of detectedDirectives) {
+                    memory.userDirectives = addDirective(memory.userDirectives, directive);
+                    updated = true;
+                }
+            }
+            // Learn from Bash commands
+            if (toolName !== 'Bash') {
+                if (updated) {
+                    await saveProjectMemory(projectRoot, memory);
+                }
+                return;
+            }
+            const command = toolInput?.command || '';
+            if (!command) {
+                return;
+            }
+            try {
+                // Detect and store build commands
+                if (isBuildCommand(command)) {
+                    if (!memory.build.buildCommand || memory.build.buildCommand !== command) {
+                        memory.build.buildCommand = command;
+                        updated = true;
+                    }
+                }
+                // Detect and store test commands
+                if (isTestCommand(command)) {
+                    if (!memory.build.testCommand || memory.build.testCommand !== command) {
+                        memory.build.testCommand = command;
+                        updated = true;
+                    }
+                }
+                // Extract environment hints from output
+                const hints = extractEnvironmentHints(toolOutput);
+                if (hints.length > 0) {
+                    for (const hint of hints) {
+                        // Only add if not already present
+                        const exists = memory.customNotes.some(n => n.category === hint.category && n.content === hint.content);
+                        if (!exists) {
+                            memory.customNotes.push(hint);
+                            updated = true;
+                        }
+                    }
+                    // Limit custom notes to 20 entries
+                    if (memory.customNotes.length > 20) {
+                        memory.customNotes = memory.customNotes.slice(-20);
+                    }
+                }
+                // Save if updated
+                if (updated) {
+                    await saveProjectMemory(projectRoot, memory);
+                }
+            }
+            catch (error) {
+                // Silently fail
+                console.error('Error learning from tool output:', error);
+            }
+        });
+    });
 }
 /**
  * Check if command is a build command
@@ -179,25 +202,30 @@ function extractEnvironmentHints(output) {
  * @param content - Note content
  */
 export async function addCustomNote(projectRoot, category, content) {
-    try {
-        const memory = await loadProjectMemory(projectRoot);
-        if (!memory) {
-            return;
-        }
-        memory.customNotes.push({
-            timestamp: Date.now(),
-            source: 'manual',
-            category,
-            content,
+    return withMutex(projectRoot, async () => {
+        // Cross-process file lock for safe concurrent access
+        await withProjectMemoryLock(projectRoot, async () => {
+            try {
+                const memory = await loadProjectMemory(projectRoot);
+                if (!memory) {
+                    return;
+                }
+                memory.customNotes.push({
+                    timestamp: Date.now(),
+                    source: 'manual',
+                    category,
+                    content,
+                });
+                // Limit to 20 entries
+                if (memory.customNotes.length > 20) {
+                    memory.customNotes = memory.customNotes.slice(-20);
+                }
+                await saveProjectMemory(projectRoot, memory);
+            }
+            catch (error) {
+                console.error('Error adding custom note:', error);
+            }
         });
-        // Limit to 20 entries
-        if (memory.customNotes.length > 20) {
-            memory.customNotes = memory.customNotes.slice(-20);
-        }
-        await saveProjectMemory(projectRoot, memory);
-    }
-    catch (error) {
-        console.error('Error adding custom note:', error);
-    }
+    });
 }
 //# sourceMappingURL=learner.js.map

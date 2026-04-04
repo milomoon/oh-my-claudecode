@@ -1,7 +1,8 @@
 import type { HeartbeatData, TaskFile, OutboxMessage } from './types.js';
+import { generateUsageReport } from './usage-tracker.js';
 export interface WorkerStatus {
     workerName: string;
-    provider: 'codex' | 'gemini';
+    provider: 'claude' | 'codex' | 'gemini';
     heartbeat: HeartbeatData | null;
     isAlive: boolean;
     currentTask: TaskFile | null;
@@ -23,7 +24,16 @@ export interface TeamStatus {
         pending: number;
         inProgress: number;
     };
+    usage: ReturnType<typeof generateUsageReport>;
+    performance: {
+        taskScanMs: number;
+        workerScanMs: number;
+        usageReadMs: number;
+        totalMs: number;
+    };
     lastUpdated: string;
 }
-export declare function getTeamStatus(teamName: string, workingDirectory: string, heartbeatMaxAgeMs?: number): TeamStatus;
+export declare function getTeamStatus(teamName: string, workingDirectory: string, heartbeatMaxAgeMs?: number, options?: {
+    includeUsage?: boolean;
+}): TeamStatus;
 //# sourceMappingURL=team-status.d.ts.map

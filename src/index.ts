@@ -1,11 +1,11 @@
 /**
- * Oh-My-Claude-Sisyphus
+ * Oh-My-ClaudeCode
  *
  * A multi-agent orchestration system for the Claude Agent SDK.
  * Inspired by oh-my-opencode, reimagined for Claude Code.
  *
  * Main features:
- * - Sisyphus: Primary orchestrator that delegates to specialized subagents
+ * - OMC: Primary orchestrator that delegates to specialized subagents
  * - Parallel execution: Background agents run concurrently
  * - LSP/AST tools: IDE-like capabilities for agents
  * - Context management: Auto-injection from AGENTS.md/CLAUDE.md
@@ -17,10 +17,9 @@ import { loadConfig, findContextFiles, loadContextFromFiles } from './config/loa
 import { getAgentDefinitions, omcSystemPrompt } from './agents/definitions.js';
 import { getDefaultMcpServers, toSdkMcpFormat } from './mcp/servers.js';
 import { omcToolsServer, getOmcToolNames } from './mcp/omc-tools-server.js';
-import { codexMcpServer } from './mcp/codex-server.js';
-import { geminiMcpServer } from './mcp/gemini-server.js';
 import { createMagicKeywordProcessor, detectMagicKeywords } from './features/magic-keywords.js';
 import { continuationSystemPromptAddition } from './features/continuation-enforcement.js';
+import { appendSkininthegamebrosGuidance } from './agents/skininthegamebros-guidance.js';
 import {
   createBackgroundTaskManager,
   shouldRunInBackground as shouldRunInBackgroundFn,
@@ -112,6 +111,7 @@ export {
   type InjectionStrategy,
   type InjectionResult
 } from './features/index.js';
+export { searchSessionHistory, parseSinceSpec, type SessionHistoryMatch, type SessionHistorySearchOptions, type SessionHistorySearchReport } from './features/index.js';
 
 // Agent module exports (modular agent system)
 export {
@@ -146,26 +146,25 @@ export {
   ARCHITECT_PROMPT_METADATA,
   exploreAgent,
   EXPLORE_PROMPT_METADATA,
-  researcherAgent,
-  RESEARCHER_PROMPT_METADATA,
+  DOCUMENT_SPECIALIST_PROMPT_METADATA,
+  tracerAgent,
+  TRACER_PROMPT_METADATA,
   executorAgent,
-  SISYPHUS_JUNIOR_PROMPT_METADATA,
+  EXECUTOR_PROMPT_METADATA,
   designerAgent,
   FRONTEND_ENGINEER_PROMPT_METADATA,
   writerAgent,
   DOCUMENT_WRITER_PROMPT_METADATA,
-  visionAgent,
-  MULTIMODAL_LOOKER_PROMPT_METADATA,
   criticAgent,
   CRITIC_PROMPT_METADATA,
   analystAgent,
   ANALYST_PROMPT_METADATA,
   plannerAgent,
   PLANNER_PROMPT_METADATA,
-  // Deprecated (backward compat - will be removed in v4.0.0)
-  coordinatorAgent,
-  ORCHESTRATOR_SISYPHUS_PROMPT_METADATA
 } from './agents/index.js';
+
+/** @deprecated Use documentSpecialistAgent instead */
+export { documentSpecialistAgent as researcherAgent } from './agents/document-specialist.js';
 
 // Command expansion utilities for SDK integration
 export {
@@ -196,9 +195,9 @@ export {
 } from './installer/index.js';
 
 /**
- * Options for creating a Sisyphus session
+ * Options for creating a OMC session
  */
-export interface SisyphusOptions {
+export interface OmcOptions {
   /** Custom configuration (merged with loaded config) */
   config?: Partial<PluginConfig>;
   /** Working directory (default: process.cwd()) */
@@ -214,9 +213,9 @@ export interface SisyphusOptions {
 }
 
 /**
- * Result of creating a Sisyphus session
+ * Result of creating a OMC session
  */
-export interface SisyphusSession {
+export interface OmcSession {
   /** The query options to pass to Claude Agent SDK */
   queryOptions: {
     options: {
@@ -242,7 +241,7 @@ export interface SisyphusSession {
 }
 
 /**
- * Create a Sisyphus orchestration session
+ * Create a OMC orchestration session
  *
  * This prepares all the configuration and options needed
  * to run a query with the Claude Agent SDK.
@@ -252,7 +251,7 @@ export interface SisyphusSession {
  * import { createOmcSession } from 'oh-my-claudecode';
  * import { query } from '@anthropic-ai/claude-agent-sdk';
  *
- * const session = createSisyphusSession();
+ * const session = createOmcSession();
  *
  * // Use with Claude Agent SDK
  * for await (const message of query({
@@ -263,7 +262,7 @@ export interface SisyphusSession {
  * }
  * ```
  */
-export function createSisyphusSession(options?: SisyphusOptions): SisyphusSession {
+export function createOmcSession(options?: OmcOptions): OmcSession {
   // Load configuration
   const loadedConfig = options?.skipConfigLoad ? {} : loadConfig();
   const config: PluginConfig = {
@@ -281,7 +280,7 @@ export function createSisyphusSession(options?: SisyphusOptions): SisyphusSessio
   }
 
   // Build system prompt
-  let systemPrompt = omcSystemPrompt;
+  let systemPrompt = appendSkininthegamebrosGuidance(omcSystemPrompt, 'system');
 
   // Add continuation enforcement
   if (config.features?.continuationEnforcement !== false) {
@@ -299,7 +298,7 @@ export function createSisyphusSession(options?: SisyphusOptions): SisyphusSessio
   }
 
   // Get agent definitions
-  const agents = getAgentDefinitions();
+  const agents = getAgentDefinitions({ config });
 
   // Build MCP servers configuration
   const externalMcpServers = getDefaultMcpServers({
@@ -338,10 +337,6 @@ export function createSisyphusSession(options?: SisyphusOptions): SisyphusSessio
   });
   allowedTools.push(...omcTools);
 
-  // Add Codex and Gemini MCP tool patterns
-  allowedTools.push('mcp__x__*');
-  allowedTools.push('mcp__g__*');
-
   // Create magic keyword processor
   const processPrompt = createMagicKeywordProcessor(config.magicKeywords);
 
@@ -362,9 +357,7 @@ export function createSisyphusSession(options?: SisyphusOptions): SisyphusSessio
         agents,
         mcpServers: {
           ...toSdkMcpFormat(externalMcpServers),
-          't': omcToolsServer as any,
-          'x': codexMcpServer as any,
-          'g': geminiMcpServer as any
+          't': omcToolsServer as any
         },
         allowedTools,
         permissionMode: 'acceptEdits'
@@ -384,7 +377,7 @@ export function createSisyphusSession(options?: SisyphusOptions): SisyphusSessio
 }
 
 /**
- * Quick helper to process a prompt with Sisyphus enhancements
+ * Quick helper to process a prompt with OMC enhancements
  */
 export function enhancePrompt(prompt: string, config?: PluginConfig): string {
   const processor = createMagicKeywordProcessor(config?.magicKeywords);
@@ -398,7 +391,7 @@ export function getOmcSystemPrompt(options?: {
   includeContinuation?: boolean;
   customAddition?: string;
 }): string {
-  let prompt = omcSystemPrompt;
+  let prompt = appendSkininthegamebrosGuidance(omcSystemPrompt, 'system');
 
   if (options?.includeContinuation !== false) {
     prompt += continuationSystemPromptAddition;

@@ -32,15 +32,21 @@ export interface RalphLoopState {
     current_story_id?: string;
     /** Whether ultrawork is linked/auto-activated with ralph */
     linked_ultrawork?: boolean;
+    /** Reviewer mode for Ralph completion verification */
+    critic_mode?: RalphCriticMode;
 }
+export declare const RALPH_CRITIC_MODES: readonly ["architect", "critic", "codex"];
+export type RalphCriticMode = typeof RALPH_CRITIC_MODES[number];
 export interface RalphLoopOptions {
     /** Maximum iterations (default: 10) */
     maxIterations?: number;
     /** Disable auto-activation of ultrawork (default: false - ultrawork is enabled) */
     disableUltrawork?: boolean;
+    /** Reviewer mode for Ralph completion verification */
+    criticMode?: RalphCriticMode;
 }
 export interface RalphLoopHook {
-    startLoop: (sessionId: string, prompt: string, options?: RalphLoopOptions) => boolean;
+    startLoop: (sessionId: string | undefined, prompt: string, options?: RalphLoopOptions) => boolean;
     cancelLoop: (sessionId: string) => boolean;
     getState: () => RalphLoopState | null;
 }
@@ -53,7 +59,7 @@ export declare function readRalphState(directory: string, sessionId?: string): R
  */
 export declare function writeRalphState(directory: string, state: RalphLoopState, sessionId?: string): boolean;
 /**
- * Clear Ralph Loop state
+ * Clear Ralph Loop state (includes ghost-legacy cleanup)
  */
 export declare function clearRalphState(directory: string, sessionId?: string): boolean;
 /**
@@ -64,6 +70,26 @@ export declare function clearLinkedUltraworkState(directory: string, sessionId?:
  * Increment Ralph Loop iteration
  */
 export declare function incrementRalphIteration(directory: string, sessionId?: string): RalphLoopState | null;
+/**
+ * Detect if prompt contains --no-prd flag (case-insensitive)
+ */
+export declare function detectNoPrdFlag(prompt: string): boolean;
+/**
+ * Strip --no-prd flag from prompt text and trim whitespace
+ */
+export declare function stripNoPrdFlag(prompt: string): string;
+/**
+ * Normalize a Ralph critic mode flag value.
+ */
+export declare function normalizeRalphCriticMode(value: string | null | undefined): RalphCriticMode | null;
+/**
+ * Detect --critic=<mode> flag (case-insensitive).
+ */
+export declare function detectCriticModeFlag(prompt: string): RalphCriticMode | null;
+/**
+ * Strip --critic=<mode> flag from prompt text and trim whitespace.
+ */
+export declare function stripCriticModeFlag(prompt: string): string;
 /**
  * Create a Ralph Loop hook instance
  */
@@ -102,6 +128,14 @@ export declare function recordStoryProgress(directory: string, storyId: string, 
  * Add a codebase pattern discovered during work
  */
 export declare function recordPattern(directory: string, pattern: string): boolean;
+/**
+ * Check if an active team pipeline should influence ralph loop continuation.
+ * Returns:
+ *  - 'continue' if team is in a phase where ralph should keep looping (team-verify, team-fix, team-exec)
+ *  - 'complete' if team reached a terminal state (complete, failed)
+ *  - null if no team state is active (ralph operates independently)
+ */
+export declare function getTeamPhaseDirective(directory: string, sessionId?: string): "continue" | "complete" | null;
 /**
  * Check if ralph should complete based on PRD status
  */

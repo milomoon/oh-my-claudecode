@@ -26,7 +26,8 @@ try {
 }
 
 // Constants (used by fallback)
-const USER_SKILLS_DIR = join(homedir(), '.claude', 'skills', 'omc-learned');
+const cfgDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+const USER_SKILLS_DIR = join(cfgDir, 'skills', 'omc-learned');
 const GLOBAL_SKILLS_DIR = join(homedir(), '.omc', 'skills');
 const PROJECT_SKILLS_SUBDIR = join('.omc', 'skills');
 const SKILL_EXTENSION = '.md';
@@ -129,8 +130,9 @@ function findMatchingSkillsFallback(prompt, directory, sessionId) {
   const candidates = findSkillFilesFallback(directory);
   const matches = [];
 
-  // Get or create session cache
+  // Get or create session cache (cap size to prevent unbounded growth)
   if (!injectedCacheFallback.has(sessionId)) {
+    if (injectedCacheFallback.size > 500) injectedCacheFallback.clear();
     injectedCacheFallback.set(sessionId, new Set());
   }
   const alreadyInjected = injectedCacheFallback.get(sessionId);
@@ -242,7 +244,7 @@ async function main() {
   try {
     const input = await readStdin();
     if (!input.trim()) {
-      console.log(JSON.stringify({ continue: true }));
+      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -255,7 +257,7 @@ async function main() {
 
     // Skip if no prompt
     if (!prompt) {
-      console.log(JSON.stringify({ continue: true }));
+      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -280,11 +282,11 @@ async function main() {
         }
       }));
     } else {
-      console.log(JSON.stringify({ continue: true }));
+      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
     }
   } catch (error) {
     // On any error, allow continuation
-    console.log(JSON.stringify({ continue: true }));
+    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
   }
 }
 

@@ -8,11 +8,9 @@ export declare const MODES: {
     readonly AUTOPILOT: "autopilot";
     readonly RALPH: "ralph";
     readonly ULTRAWORK: "ultrawork";
-    readonly ULTRAPILOT: "ultrapilot";
     readonly ULTRAQA: "ultraqa";
-    readonly ECOMODE: "ecomode";
     readonly TEAM: "team";
-    readonly PIPELINE: "pipeline";
+    readonly RALPLAN: "ralplan";
 };
 export type ModeName = typeof MODES[keyof typeof MODES];
 export declare const TOOL_CATEGORIES: {
@@ -24,8 +22,11 @@ export declare const TOOL_CATEGORIES: {
     readonly MEMORY: "memory";
     readonly TRACE: "trace";
     readonly SKILLS: "skills";
+    readonly INTEROP: "interop";
     readonly CODEX: "codex";
     readonly GEMINI: "gemini";
+    readonly SHARED_MEMORY: "shared-memory";
+    readonly DEEPINIT: "deepinit";
 };
 export type ToolCategory = typeof TOOL_CATEGORIES[keyof typeof TOOL_CATEGORIES];
 export declare const HOOK_EVENTS: {

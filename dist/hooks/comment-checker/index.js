@@ -45,7 +45,6 @@ function detectComments(content, filePath) {
         return [];
     }
     const comments = [];
-    const _lines = content.split('\n');
     // Reset regex state
     pattern.lastIndex = 0;
     let match;
@@ -161,16 +160,6 @@ export function checkForComments(filePath, content, oldString, newString, edits)
  * Pending calls tracking
  */
 const pendingCalls = new Map();
-const PENDING_CALL_TTL = 60_000;
-function cleanupOldPendingCalls() {
-    const now = Date.now();
-    for (const [callID, call] of pendingCalls) {
-        if (now - call.timestamp > PENDING_CALL_TTL) {
-            pendingCalls.delete(callID);
-        }
-    }
-}
-let cleanupIntervalStarted = false;
 /**
  * Create comment checker hook for Claude Code shell hooks
  *
@@ -179,10 +168,6 @@ let cleanupIntervalStarted = false;
  */
 export function createCommentCheckerHook(config) {
     debugLog('createCommentCheckerHook called', { config });
-    if (!cleanupIntervalStarted) {
-        cleanupIntervalStarted = true;
-        setInterval(cleanupOldPendingCalls, 10_000);
-    }
     return {
         /**
          * PreToolUse - Track pending write/edit calls

@@ -11,10 +11,12 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpa
 import { join, dirname, basename } from "path";
 import { homedir } from "os";
 import { OmcPaths } from "../../lib/worktree-paths.js";
+import { expandTriggers } from "./transliteration-map.js";
 // Re-export constants
 export const USER_SKILLS_DIR = join(homedir(), ".claude", "skills", "omc-learned");
 export const GLOBAL_SKILLS_DIR = join(homedir(), ".omc", "skills");
 export const PROJECT_SKILLS_SUBDIR = OmcPaths.SKILLS;
+export const PROJECT_AGENT_SKILLS_SUBDIR = join(".agents", "skills");
 export const SKILL_EXTENSION = ".md";
 /** Session TTL: 1 hour */
 const SESSION_TTL_MS = 60 * 60 * 1000;
@@ -24,6 +26,7 @@ const MAX_RECURSION_DEPTH = 10;
 const LEVENSHTEIN_CACHE_SIZE = 1000;
 /** Skill metadata cache TTL in milliseconds (30 seconds) */
 const SKILL_CACHE_TTL_MS = 30 * 1000;
+const MAX_CACHE_ENTRIES = 50;
 // =============================================================================
 // Performance Caches
 // =============================================================================
@@ -62,6 +65,8 @@ function getSkillMetadataCache(projectRoot) {
     const cached = skillMetadataCache.get(projectRoot);
     const now = Date.now();
     if (cached && now - cached.timestamp < SKILL_CACHE_TTL_MS) {
+        skillMetadataCache.delete(projectRoot);
+        skillMetadataCache.set(projectRoot, cached);
         return cached.skills;
     }
     // Refresh cache
@@ -81,7 +86,7 @@ function getSkillMetadataCache(projectRoot) {
                 path: candidate.path,
                 name,
                 triggers,
-                triggersLower: triggers.map((t) => t.toLowerCase()),
+                triggersLower: expandTriggers(triggers.map((t) => t.toLowerCase())),
                 matching: parsed.metadata.matching,
                 content: parsed.content,
                 scope: candidate.scope,
@@ -90,6 +95,11 @@ function getSkillMetadataCache(projectRoot) {
         catch {
             // Ignore file read errors
         }
+    }
+    if (skillMetadataCache.size >= MAX_CACHE_ENTRIES) {
+        const firstKey = skillMetadataCache.keys().next().value;
+        if (firstKey !== undefined)
+            skillMetadataCache.delete(firstKey);
     }
     skillMetadataCache.set(projectRoot, { skills, timestamp: now });
     return skills;
@@ -223,8 +233,12 @@ function safeRealpathSync(filePath) {
  * Check if a resolved path is within a boundary directory.
  */
 function isWithinBoundary(realPath, boundary) {
-    const normalizedReal = realPath.replace(/\\/g, "/").replace(/\/+/g, "/");
-    const normalizedBoundary = boundary.replace(/\\/g, "/").replace(/\/+/g, "/");
+    const normalizedReal = safeRealpathSync(realPath)
+        .replace(/\\/g, "/")
+        .replace(/\/+/g, "/");
+    const normalizedBoundary = safeRealpathSync(boundary)
+        .replace(/\\/g, "/")
+        .replace(/\/+/g, "/");
     return (normalizedReal === normalizedBoundary ||
         normalizedReal.startsWith(normalizedBoundary + "/"));
 }
@@ -239,22 +253,27 @@ export function findSkillFiles(projectRoot, options) {
     const scope = options?.scope ?? "all";
     // 1. Search project-level skills (higher priority)
     if (scope === "project" || scope === "all") {
-        const projectSkillsDir = join(projectRoot, PROJECT_SKILLS_SUBDIR);
-        const projectFiles = [];
-        findSkillFilesRecursive(projectSkillsDir, projectFiles);
-        for (const filePath of projectFiles) {
-            const realPath = safeRealpathSync(filePath);
-            if (seenRealPaths.has(realPath))
-                continue;
-            if (!isWithinBoundary(realPath, projectSkillsDir))
-                continue;
-            seenRealPaths.add(realPath);
-            candidates.push({
-                path: filePath,
-                realPath,
-                scope: "project",
-                sourceDir: projectSkillsDir,
-            });
+        const projectSkillDirs = [
+            join(projectRoot, PROJECT_SKILLS_SUBDIR),
+            join(projectRoot, PROJECT_AGENT_SKILLS_SUBDIR),
+        ];
+        for (const projectSkillsDir of projectSkillDirs) {
+            const projectFiles = [];
+            findSkillFilesRecursive(projectSkillsDir, projectFiles);
+            for (const filePath of projectFiles) {
+                const realPath = safeRealpathSync(filePath);
+                if (seenRealPaths.has(realPath))
+                    continue;
+                if (!isWithinBoundary(realPath, projectSkillsDir))
+                    continue;
+                seenRealPaths.add(realPath);
+                candidates.push({
+                    path: filePath,
+                    realPath,
+                    scope: "project",
+                    sourceDir: projectSkillsDir,
+                });
+            }
         }
     }
     // 2. Search user-level skills from both directories (lower priority)

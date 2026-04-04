@@ -6,7 +6,7 @@
  * processPreToolUse integration in bridge.ts
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   processOrchestratorPreTool,
   isAllowedPath,
@@ -442,6 +442,10 @@ describe('delegation-enforcement-levels', () => {
       vi.mock('../hud/background-tasks.js', () => ({
         addBackgroundTask: vi.fn(),
         completeBackgroundTask: vi.fn(),
+        completeMostRecentMatchingBackgroundTask: vi.fn(),
+        getRunningTaskCount: vi.fn(() => 0),
+        remapBackgroundTaskId: vi.fn(),
+        remapMostRecentMatchingBackgroundTaskId: vi.fn(),
       }));
       vi.mock('../hooks/ralph/index.js', () => ({
         readRalphState: vi.fn(() => null),
@@ -565,7 +569,7 @@ describe('delegation-enforcement-levels', () => {
         expect.stringContaining('task-'),
         'Test task',
         'executor',
-        '/tmp/test-project'
+        process.cwd()
       );
     });
   });

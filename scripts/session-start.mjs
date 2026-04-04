@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * Sisyphus Session Start Hook (Node.js)
+ * OMC Session Start Hook (Node.js)
  * Restores persistent mode states when session starts
  * Cross-platform: Windows, macOS, Linux
  */
 
-import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync, symlinkSync, lstatSync, readlinkSync, unlinkSync, renameSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Import timeout-protected stdin reader (prevents hangs on Linux, see issue #240)
+/** Claude config directory (respects CLAUDE_CONFIG_DIR env var) */
+const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+
+// Import timeout-protected stdin reader (prevents hangs on Linux/Windows, see issue #240, #524)
 let readStdin;
 try {
-  const mod = await import(join(__dirname, 'lib', 'stdin.mjs'));
+  const mod = await import(pathToFileURL(join(__dirname, 'lib', 'stdin.mjs')).href);
   readStdin = mod.readStdin;
 } catch {
   // Fallback: inline timeout-protected readStdin if lib module is missing
@@ -42,6 +45,89 @@ function readJsonFile(path) {
   } catch {
     return null;
   }
+}
+
+function getRuntimeBaseDir() {
+  return process.env.CLAUDE_PLUGIN_ROOT || join(__dirname, '..');
+}
+
+async function loadProjectMemoryModules() {
+  try {
+    const runtimeBase = getRuntimeBaseDir();
+    const [
+      projectMemoryStorage,
+      projectMemoryDetector,
+      projectMemoryFormatter,
+      rulesFinder,
+    ] = await Promise.all([
+      import(pathToFileURL(join(runtimeBase, 'dist', 'hooks', 'project-memory', 'storage.js')).href),
+      import(pathToFileURL(join(runtimeBase, 'dist', 'hooks', 'project-memory', 'detector.js')).href),
+      import(pathToFileURL(join(runtimeBase, 'dist', 'hooks', 'project-memory', 'formatter.js')).href),
+      import(pathToFileURL(join(runtimeBase, 'dist', 'hooks', 'rules-injector', 'finder.js')).href),
+    ]);
+
+    return {
+      loadProjectMemory: projectMemoryStorage.loadProjectMemory,
+      saveProjectMemory: projectMemoryStorage.saveProjectMemory,
+      shouldRescan: projectMemoryStorage.shouldRescan,
+      detectProjectEnvironment: projectMemoryDetector.detectProjectEnvironment,
+      formatContextSummary: projectMemoryFormatter.formatContextSummary,
+      findProjectRoot: rulesFinder.findProjectRoot,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasProjectMemoryContent(memory) {
+  return Boolean(
+    memory &&
+    (
+      memory.userDirectives?.length ||
+      memory.customNotes?.length ||
+      memory.hotPaths?.length ||
+      memory.techStack?.languages?.length ||
+      memory.techStack?.frameworks?.length ||
+      memory.build?.buildCommand ||
+      memory.build?.testCommand
+    )
+  );
+}
+
+async function resolveProjectMemorySummary(directory, projectMemoryModules) {
+  const {
+    detectProjectEnvironment,
+    findProjectRoot,
+    formatContextSummary,
+    loadProjectMemory,
+    saveProjectMemory,
+    shouldRescan,
+  } = projectMemoryModules;
+
+  const projectRoot = findProjectRoot?.(directory);
+  if (!projectRoot) {
+    return '';
+  }
+
+  let memory = await loadProjectMemory?.(projectRoot);
+
+  if ((!memory || shouldRescan?.(memory)) && detectProjectEnvironment && saveProjectMemory) {
+    const existing = memory;
+    memory = await detectProjectEnvironment(projectRoot);
+
+    if (existing) {
+      memory.customNotes = existing.customNotes;
+      memory.userDirectives = existing.userDirectives;
+    }
+
+    await saveProjectMemory(projectRoot, memory);
+  }
+
+  if (!hasProjectMemoryContent(memory)) {
+    return '';
+  }
+
+  return formatContextSummary(memory)?.trim() || '';
 }
 
 // Semantic version comparison (for cache cleanup sorting)
@@ -75,7 +161,7 @@ function getPluginVersion() {
 // Get npm global package version
 function getNpmVersion() {
   try {
-    const versionFile = join(homedir(), '.claude', '.omc-version.json');
+    const versionFile = join(configDir, '.omc-version.json');
     const data = readJsonFile(versionFile);
     return data?.version || null;
   } catch { return null; }
@@ -84,7 +170,7 @@ function getNpmVersion() {
 // Get CLAUDE.md version
 function getClaudeMdVersion() {
   try {
-    const claudeMdPath = join(homedir(), '.claude', 'CLAUDE.md');
+    const claudeMdPath = join(configDir, 'CLAUDE.md');
     if (!existsSync(claudeMdPath)) return null;  // File doesn't exist
     const content = readFileSync(claudeMdPath, 'utf-8');
     const version = extractOmcVersion(content);
@@ -128,7 +214,7 @@ function detectVersionDrift() {
 
 // Check if we should notify (once per unique drift combination)
 function shouldNotifyDrift(driftInfo) {
-  const stateFile = join(homedir(), '.claude', '.omc', 'update-state.json');
+  const stateFile = join(configDir, '.omc', 'update-state.json');
   const driftKey = `plugin:${driftInfo.pluginVersion}-npm:${driftInfo.npmVersion}-claude:${driftInfo.claudeMdVersion}`;
 
   try {
@@ -140,7 +226,7 @@ function shouldNotifyDrift(driftInfo) {
 
   // Save new drift state
   try {
-    const dir = join(homedir(), '.claude', '.omc');
+    const dir = join(configDir, '.omc');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(stateFile, JSON.stringify({
       lastNotifiedDrift: driftKey,
@@ -153,7 +239,7 @@ function shouldNotifyDrift(driftInfo) {
 
 // Check npm registry for available update (with 24h cache)
 async function checkNpmUpdate(currentVersion) {
-  const cacheFile = join(homedir(), '.claude', '.omc', 'update-check.json');
+  const cacheFile = join(configDir, '.omc', 'update-check.json');
   const CACHE_DURATION = 24 * 60 * 60 * 1000;
   const now = Date.now();
 
@@ -170,13 +256,12 @@ async function checkNpmUpdate(currentVersion) {
   } catch {}
 
   // Fetch from npm registry with 2s timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
     const response = await fetch('https://registry.npmjs.org/oh-my-claude-sisyphus/latest', {
       signal: controller.signal
     });
-    clearTimeout(timeoutId);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -185,28 +270,28 @@ async function checkNpmUpdate(currentVersion) {
 
     // Update cache
     try {
-      const dir = join(homedir(), '.claude', '.omc');
+      const dir = join(configDir, '.omc');
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(cacheFile, JSON.stringify({ timestamp: now, latestVersion, currentVersion, updateAvailable }));
     } catch {}
 
     return updateAvailable ? { currentVersion, latestVersion } : null;
-  } catch { return null; }
+  } catch { return null; } finally { clearTimeout(timeoutId); }
 }
 
 // Check if HUD is properly installed (with retry for race conditions)
 async function checkHudInstallation(retryCount = 0) {
-  const hudDir = join(homedir(), '.claude', 'hud');
-  // Support both legacy (sisyphus-hud.mjs) and current (omc-hud.mjs) naming
+  const hudDir = join(configDir, 'hud');
+  // Support current and legacy script names
   const hudScriptOmc = join(hudDir, 'omc-hud.mjs');
-  const hudScriptSisyphus = join(hudDir, 'sisyphus-hud.mjs');
-  const settingsFile = join(homedir(), '.claude', 'settings.json');
+  const hudScriptLegacy = join(hudDir, 'omc-hud.js');
+  const settingsFile = join(configDir, 'settings.json');
 
   const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 100;
 
   // Check if HUD script exists (either naming convention)
-  const hudScriptExists = existsSync(hudScriptOmc) || existsSync(hudScriptSisyphus);
+  const hudScriptExists = existsSync(hudScriptOmc) || existsSync(hudScriptLegacy);
   if (!hudScriptExists) {
     return { installed: false, reason: 'HUD script missing' };
   }
@@ -232,6 +317,35 @@ async function checkHudInstallation(retryCount = 0) {
           return checkHudInstallation(retryCount + 1);
         }
         return { installed: false, reason: 'statusLine not configured' };
+      }
+
+      const statusLineCommand = typeof settings.statusLine === 'string'
+        ? settings.statusLine
+        : (typeof settings.statusLine === 'object' && settings.statusLine && typeof settings.statusLine.command === 'string'
+          ? settings.statusLine.command
+          : null);
+
+      // If OMC HUD wrapper is configured, ensure at least one plugin cache version is built.
+      if (statusLineCommand?.includes('omc-hud')) {
+        const pluginCacheBase = join(configDir, 'plugins', 'cache', 'omc', 'oh-my-claudecode');
+        if (existsSync(pluginCacheBase)) {
+          const versions = readdirSync(pluginCacheBase)
+            .filter(version => !version.startsWith('.'))
+            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+            .reverse();
+          if (versions.length > 0) {
+            const hasBuiltHud = versions.some(version =>
+              existsSync(join(pluginCacheBase, version, 'dist', 'hud', 'index.js'))
+            );
+            if (!hasBuiltHud) {
+              const latestVersionDir = join(pluginCacheBase, versions[0]);
+              return {
+                installed: false,
+                reason: `HUD plugin cache is not built. Run: cd "${latestVersionDir}" && npm install && npm run build`,
+              };
+            }
+          }
+        }
       }
     } else {
       return { installed: false, reason: 'settings.json missing' };
@@ -259,6 +373,7 @@ async function main() {
     const directory = data.cwd || data.directory || process.cwd();
     const sessionId = data.session_id || data.sessionId || '';
     const messages = [];
+    const projectMemoryModules = await loadProjectMemoryModules();
 
     // Check for version drift between components
     const driftInfo = detectVersionDrift();
@@ -283,11 +398,22 @@ async function main() {
       }
     } catch {}
 
+    // Warn if silentAutoUpdate is enabled but running in plugin mode (#1773)
+    if (process.env.CLAUDE_PLUGIN_ROOT) {
+      try {
+        const omcConfigPath = join(configDir, '.omc-config.json');
+        const omcConfig = readJsonFile(omcConfigPath);
+        if (omcConfig?.silentAutoUpdate) {
+          messages.push(`<session-restore>\n\n[OMC] silentAutoUpdate is enabled in .omc-config.json but has no effect in plugin mode.\nTo update, use: /plugin marketplace update omc && /omc-setup\nOr run manually: omc update\n\n</session-restore>\n\n---\n`);
+        }
+      } catch {}
+    }
+
     // Check HUD installation (one-time setup guidance)
     const hudCheck = await checkHudInstallation();
     if (!hudCheck.installed) {
       messages.push(`<system-reminder>
-[Sisyphus] HUD not configured (${hudCheck.reason}). Run /hud setup then restart Claude Code.
+[OMC] HUD not configured (${hudCheck.reason}). Run /hud setup then restart Claude Code.
 </system-reminder>`);
     }
 
@@ -314,7 +440,7 @@ async function main() {
 You have an active ultrawork session from ${ultraworkState.started_at}.
 Original task: ${ultraworkState.original_prompt}
 
-Continue working in ultrawork mode until all tasks are complete.
+Treat this as prior-session context only. Prioritize the user's newest request, and resume ultrawork only if the user explicitly asks to continue it.
 
 </session-restore>
 
@@ -348,7 +474,7 @@ You have an active ralph-loop session.
 Original task: ${ralphState.prompt || 'Task in progress'}
 Iteration: ${ralphState.iteration || 1}/${ralphState.max_iterations || 10}
 
-Continue working until the task is verified complete.
+Treat this as prior-session context only. Prioritize the user's newest request, and resume the ralph loop only if the user explicitly asks to continue it.
 
 </session-restore>
 
@@ -381,12 +507,32 @@ Continue working until the task is verified complete.
 [PENDING TASKS DETECTED]
 
 You have ${incompleteCount} incomplete tasks from a previous session.
-Please continue working on these tasks.
+Treat this as prior-session context only. Prioritize the user's newest request, and resume these tasks only if the user explicitly asks to continue them.
 
 </session-restore>
 
 ---
 `);
+    }
+
+    if (projectMemoryModules) {
+      try {
+        const summary = await resolveProjectMemorySummary(directory, projectMemoryModules);
+        if (summary) {
+          messages.push(`<project-memory-context>
+
+[PROJECT MEMORY]
+
+${summary}
+
+</project-memory-context>
+
+---
+`);
+        }
+      } catch {
+        // Project memory is additive only; never break session start.
+      }
     }
 
     // Check for notepad Priority Context
@@ -411,22 +557,98 @@ ${cleanContent}
       }
     }
 
-    // Cleanup old plugin cache versions (keep latest 2)
+    // Cleanup old plugin cache versions (keep latest 2, symlink the rest)
+    // Instead of deleting old versions, replace them with symlinks to the latest.
+    // This prevents "Cannot find module" errors for sessions started before a
+    // plugin update whose CLAUDE_PLUGIN_ROOT still points to the old version.
     try {
-      const cacheBase = join(homedir(), '.claude', 'plugins', 'cache', 'omc', 'oh-my-claudecode');
+      const cacheBase = join(configDir, 'plugins', 'cache', 'omc', 'oh-my-claudecode');
       if (existsSync(cacheBase)) {
         const versions = readdirSync(cacheBase)
           .filter(v => /^\d+\.\d+\.\d+/.test(v))
           .sort(semverCompare)
           .reverse();
-        const toRemove = versions.slice(2);
-        for (const version of toRemove) {
-          try {
-            rmSync(join(cacheBase, version), { recursive: true, force: true });
-          } catch {}
+
+        if (versions.length > 2) {
+          const latest = versions[0];
+          const toSymlink = versions.slice(2);
+          for (const version of toSymlink) {
+            try {
+              const versionPath = join(cacheBase, version);
+              const stat = lstatSync(versionPath);
+
+              const isWin = process.platform === 'win32';
+              const symlinkTarget = isWin ? join(cacheBase, latest) : latest;
+
+              if (stat.isSymbolicLink()) {
+                // Already a symlink — update only if pointing to wrong target.
+                // Use atomic temp-symlink + rename to avoid a window where
+                // the path doesn't exist (fixes race in issue #1007).
+                const target = readlinkSync(versionPath);
+                if (target === latest || target === join(cacheBase, latest)) continue;
+                try {
+                  const tmpLink = versionPath + '.tmp.' + process.pid;
+                  symlinkSync(symlinkTarget, tmpLink, isWin ? 'junction' : undefined);
+                  try {
+                    renameSync(tmpLink, versionPath);
+                  } catch {
+                    // rename failed (e.g. cross-device) — fall back to unlink+symlink
+                    try { unlinkSync(tmpLink); } catch {}
+                    unlinkSync(versionPath);
+                    symlinkSync(symlinkTarget, versionPath, isWin ? 'junction' : undefined);
+                  }
+                } catch (swapErr) {
+                  if (swapErr?.code !== 'EEXIST') {
+                    // Leave as-is rather than losing it
+                  }
+                }
+              } else if (stat.isDirectory()) {
+                // Directory → symlink: cannot be atomic, but run.cjs now
+                // handles missing targets gracefully (issue #1007).
+                rmSync(versionPath, { recursive: true, force: true });
+                try {
+                  symlinkSync(symlinkTarget, versionPath, isWin ? 'junction' : undefined);
+                } catch (symlinkErr) {
+                  // EEXIST: another session raced us — safe to ignore.
+                  if (symlinkErr?.code !== 'EEXIST') {
+                    // Symlink genuinely failed. Leave the path as-is.
+                  }
+                }
+              }
+            } catch {
+              // lstatSync / rmSync / unlinkSync failure — leave old directory as-is.
+            }
+          }
         }
       }
     } catch {}
+
+    // Send session-start notification (non-blocking, fire-and-forget)
+    try {
+      const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+      if (pluginRoot) {
+        const { notify } = await import(pathToFileURL(join(pluginRoot, 'dist', 'notifications', 'index.js')).href);
+        // Fire and forget - don't await, don't block session start
+        notify('session-start', {
+          sessionId,
+          projectPath: directory,
+          timestamp: new Date().toISOString(),
+        }).catch(() => {}); // swallow errors silently
+
+        // Start reply listener daemon if notification reply config is available
+        try {
+          const { startReplyListener, buildDaemonConfig } = await import(pathToFileURL(join(pluginRoot, 'dist', 'notifications', 'reply-listener.js')).href);
+          const replyConfig = await buildDaemonConfig();
+          if (replyConfig) {
+            startReplyListener(replyConfig);
+          }
+        } catch {
+          // Reply listener not available or not configured, skip silently
+        }
+      }
+    } catch {
+      // Notification module not available, skip silently
+    }
 
     if (messages.length > 0) {
       console.log(JSON.stringify({
@@ -437,10 +659,10 @@ ${cleanContent}
         }
       }));
     } else {
-      console.log(JSON.stringify({ continue: true }));
+      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
     }
   } catch (error) {
-    console.log(JSON.stringify({ continue: true }));
+    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
   }
 }
 

@@ -20,7 +20,12 @@ beforeEach(() => {
     vi.clearAllMocks();
     clearCache();
     resetSecurityPolicy();
-    mockedExistsSync.mockReturnValue(false);
+    // Mock a permissive security policy that allows all test commands
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+        allowed_commands: ['echo', 'cmd1', 'cmd2', 'git', 'docker', 'node', 'npm', 'cat', 'ls', 'pwd', 'bad-cmd', 'slow-cmd', 'big-cmd', 'empty-cmd', 'multiline', 'any-command'],
+        allowed_patterns: ['.*']
+    }));
 });
 // ─── Basic Functionality ─────────────────────────────────────────────────────
 describe('isLiveDataLine', () => {
@@ -58,6 +63,22 @@ describe('resolveLiveData - basic', () => {
         expect(result).toContain('!echo skip-me');
         expect(result).toContain('<live-data command="echo run-me">ran\n</live-data>');
         expect(mockedExecSync).toHaveBeenCalledTimes(1);
+    });
+    it('skips !lines inside an unclosed/unterminated fenced code block', () => {
+        mockedExecSync.mockReturnValue('ran\n');
+        // Opening fence is never closed — directive must not execute
+        const input = '```\n!echo skip-me';
+        const result = resolveLiveData(input);
+        expect(result).toContain('!echo skip-me');
+        expect(mockedExecSync).not.toHaveBeenCalled();
+    });
+    it('skips multiple !lines after an unclosed fence', () => {
+        mockedExecSync.mockReturnValue('ran\n');
+        const input = 'before\n```bash\n!echo one\n!echo two';
+        const result = resolveLiveData(input);
+        expect(result).toContain('!echo one');
+        expect(result).toContain('!echo two');
+        expect(mockedExecSync).not.toHaveBeenCalled();
     });
     it('handles failed commands with error attribute', () => {
         const error = new Error('command failed');
@@ -200,7 +221,8 @@ describe('resolveLiveData - security', () => {
         setupPolicy({ denied_commands: ['rm', 'dd'] });
         const result = resolveLiveData('!rm -rf /tmp/test');
         expect(result).toContain('error="true"');
-        expect(result).toContain("command 'rm' is denied");
+        // Single quotes in the reason are HTML-escaped in the output
+        expect(result).toContain("command &#39;rm&#39; is denied");
         expect(mockedExecSync).not.toHaveBeenCalled();
     });
     it('blocks denied patterns', () => {
@@ -231,12 +253,34 @@ describe('resolveLiveData - security', () => {
         expect(result).toContain('files\n</live-data>');
         expect(result).not.toContain('error');
     });
-    it('works without a policy file (everything allowed)', () => {
+    it('rejects unsafe regex in denied_patterns (ReDoS prevention)', () => {
+        setupPolicy({
+            denied_patterns: ['(a+)+$'],
+            allowed_commands: ['echo'],
+        });
+        const result = resolveLiveData('!echo hello');
+        // Unsafe denied pattern → fail closed: command blocked
+        expect(result).toContain('error="true"');
+        expect(result).toContain('unsafe regex rejected');
+        expect(mockedExecSync).not.toHaveBeenCalled();
+    });
+    it('skips unsafe regex in allowed_patterns without crashing', () => {
+        setupPolicy({
+            allowed_patterns: ['(a+)+$'],
+        });
+        const result = resolveLiveData('!echo hello');
+        // Unsafe allowed pattern → skipped (fail closed), no pattern matches
+        expect(result).toContain('error="true"');
+        expect(result).toContain('not in allowlist');
+        expect(mockedExecSync).not.toHaveBeenCalled();
+    });
+    it('blocks commands when no policy file exists (secure by default)', () => {
         mockedExistsSync.mockReturnValue(false);
-        mockedExecSync.mockReturnValue('ok\n');
+        resetSecurityPolicy(); // Clear cached policy so new one is loaded
         const result = resolveLiveData('!any-command');
-        expect(result).toContain('ok\n</live-data>');
-        expect(result).not.toContain('error');
+        expect(result).toContain('error="true"');
+        expect(result).toContain('blocked: no allowlist configured');
+        expect(mockedExecSync).not.toHaveBeenCalled();
     });
 });
 // ─── Output Parsing ──────────────────────────────────────────────────────────
@@ -269,6 +313,39 @@ describe('resolveLiveData - output formats', () => {
         expect(result).toMatch(/files="\d+"/);
         expect(result).toMatch(/\+="\d+"/);
         expect(result).toMatch(/-="\d+"/);
+    });
+});
+// ─── Tag Injection Prevention ────────────────────────────────────────────────
+describe('resolveLiveData - tag injection prevention', () => {
+    it('escapes < > & " \' in command attribute', () => {
+        mockedExecSync.mockReturnValue('ok\n');
+        // Command contains characters that could break XML attribute parsing
+        const result = resolveLiveData('!echo "foo" <bar> &amp; it\'s');
+        expect(result).not.toContain('"foo"');
+        expect(result).not.toContain('<bar>');
+        expect(result).toContain('&quot;foo&quot;');
+        expect(result).toContain('&lt;bar&gt;');
+        expect(result).toContain('&amp;amp;');
+        expect(result).toContain('&#39;s');
+    });
+    it('escapes </live-data> in command output to prevent tag injection', () => {
+        mockedExecSync.mockReturnValue('</live-data><injected attr="x">pwned</live-data>');
+        const result = resolveLiveData('!cat file');
+        // The closing tag in output must be escaped, not treated as real markup
+        expect(result).not.toMatch(/<\/live-data>.*<injected/s);
+        expect(result).toContain('&lt;/live-data&gt;');
+        expect(result).toContain('&lt;injected');
+    });
+    it('escapes < > & in stdout when command fails', () => {
+        const error = new Error('cmd failed');
+        error.stderr = '<error>something & "bad"</error>';
+        mockedExecSync.mockImplementation(() => { throw error; });
+        const result = resolveLiveData('!bad-cmd');
+        expect(result).toContain('error="true"');
+        expect(result).toContain('&lt;error&gt;');
+        expect(result).toContain('&amp;');
+        expect(result).toContain('&quot;bad&quot;');
+        expect(result).not.toContain('<error>');
     });
 });
 // ─── Multi-line Scripts ──────────────────────────────────────────────────────

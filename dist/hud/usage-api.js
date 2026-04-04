@@ -12,15 +12,24 @@
  * Response: { five_hour: { utilization }, seven_day: { utilization } }
  */
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../utils/paths.js';
 import { join, dirname } from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
+import { userInfo } from 'os';
 import https from 'https';
+import { validateAnthropicBaseUrl } from '../utils/ssrf-guard.js';
+import { DEFAULT_HUD_USAGE_POLL_INTERVAL_MS, } from './types.js';
+import { readHudConfig } from './state.js';
+import { lockPathFor, withFileLock } from '../lib/file-lock.js';
 // Cache configuration
-const CACHE_TTL_SUCCESS_MS = 30 * 1000; // 30 seconds for successful responses
-const CACHE_TTL_FAILURE_MS = 15 * 1000; // 15 seconds for failures
+const CACHE_TTL_FAILURE_MS = 15 * 1000; // 15 seconds for non-transient failures
+const CACHE_TTL_TRANSIENT_NETWORK_MS = 2 * 60 * 1000; // 2 minutes to avoid hammering transient API failures
+const MAX_RATE_LIMITED_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes max for sustained 429s
 const API_TIMEOUT_MS = 10000;
+const MAX_STALE_DATA_MS = 15 * 60 * 1000; // 15 minutes — discard stale data after this
 const TOKEN_REFRESH_URL_HOSTNAME = 'platform.claude.com';
+const USAGE_CACHE_LOCK_OPTS = { staleLockMs: API_TIMEOUT_MS + 5000 };
 const TOKEN_REFRESH_URL_PATH = '/v1/oauth/token';
 /**
  * OAuth client_id for Claude Code (public client).
@@ -28,10 +37,23 @@ const TOKEN_REFRESH_URL_PATH = '/v1/oauth/token';
  */
 const DEFAULT_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 /**
+ * Check if a URL points to z.ai (exact hostname match)
+ */
+export function isZaiHost(urlString) {
+    try {
+        const url = new URL(urlString);
+        const hostname = url.hostname.toLowerCase();
+        return hostname === 'z.ai' || hostname.endsWith('.z.ai');
+    }
+    catch {
+        return false;
+    }
+}
+/**
  * Get the cache file path
  */
 function getCachePath() {
-    return join(homedir(), '.claude/plugins/oh-my-claudecode/.usage-cache.json');
+    return join(getClaudeConfigDir(), 'plugins', 'oh-my-claudecode', '.usage-cache.json');
 }
 /**
  * Read cached usage data
@@ -51,6 +73,15 @@ function readCache() {
             if (cache.data.weeklyResetsAt) {
                 cache.data.weeklyResetsAt = new Date(cache.data.weeklyResetsAt);
             }
+            if (cache.data.sonnetWeeklyResetsAt) {
+                cache.data.sonnetWeeklyResetsAt = new Date(cache.data.sonnetWeeklyResetsAt);
+            }
+            if (cache.data.opusWeeklyResetsAt) {
+                cache.data.opusWeeklyResetsAt = new Date(cache.data.opusWeeklyResetsAt);
+            }
+            if (cache.data.monthlyResetsAt) {
+                cache.data.monthlyResetsAt = new Date(cache.data.monthlyResetsAt);
+            }
         }
         return cache;
     }
@@ -61,7 +92,7 @@ function readCache() {
 /**
  * Write usage data to cache
  */
-function writeCache(data, error = false) {
+function writeCache(opts) {
     try {
         const cachePath = getCachePath();
         const cacheDir = dirname(cachePath);
@@ -70,8 +101,14 @@ function writeCache(data, error = false) {
         }
         const cache = {
             timestamp: Date.now(),
-            data,
-            error,
+            data: opts.data,
+            error: opts.error,
+            errorReason: opts.errorReason,
+            source: opts.source,
+            rateLimited: opts.rateLimited || undefined,
+            rateLimitedCount: opts.rateLimitedCount && opts.rateLimitedCount > 0 ? opts.rateLimitedCount : undefined,
+            rateLimitedUntil: opts.rateLimitedUntil,
+            lastSuccessAt: opts.lastSuccessAt,
         };
         writeFileSync(cachePath, JSON.stringify(cache, null, 2));
     }
@@ -82,9 +119,124 @@ function writeCache(data, error = false) {
 /**
  * Check if cache is still valid
  */
-function isCacheValid(cache) {
-    const ttl = cache.error ? CACHE_TTL_FAILURE_MS : CACHE_TTL_SUCCESS_MS;
+function sanitizePollIntervalMs(value) {
+    if (value == null || !Number.isFinite(value) || value <= 0) {
+        return DEFAULT_HUD_USAGE_POLL_INTERVAL_MS;
+    }
+    return Math.max(1000, Math.floor(value));
+}
+function getUsagePollIntervalMs() {
+    try {
+        return sanitizePollIntervalMs(readHudConfig().usageApiPollIntervalMs);
+    }
+    catch {
+        return DEFAULT_HUD_USAGE_POLL_INTERVAL_MS;
+    }
+}
+function getRateLimitedBackoffMs(pollIntervalMs, count) {
+    const normalizedPollIntervalMs = sanitizePollIntervalMs(pollIntervalMs);
+    return Math.min(normalizedPollIntervalMs * Math.pow(2, Math.max(0, count - 1)), MAX_RATE_LIMITED_BACKOFF_MS);
+}
+function getTransientNetworkBackoffMs(pollIntervalMs) {
+    return Math.max(CACHE_TTL_TRANSIENT_NETWORK_MS, sanitizePollIntervalMs(pollIntervalMs));
+}
+function isCacheValid(cache, pollIntervalMs) {
+    if (cache.rateLimited) {
+        if (cache.rateLimitedUntil != null) {
+            return Date.now() < cache.rateLimitedUntil;
+        }
+        const count = cache.rateLimitedCount || 1;
+        return Date.now() - cache.timestamp < getRateLimitedBackoffMs(pollIntervalMs, count);
+    }
+    const ttl = cache.error
+        ? cache.errorReason === 'network'
+            ? getTransientNetworkBackoffMs(pollIntervalMs)
+            : CACHE_TTL_FAILURE_MS
+        : sanitizePollIntervalMs(pollIntervalMs);
     return Date.now() - cache.timestamp < ttl;
+}
+function hasUsableStaleData(cache) {
+    if (!cache?.data) {
+        return false;
+    }
+    if (cache.lastSuccessAt && Date.now() - cache.lastSuccessAt > MAX_STALE_DATA_MS) {
+        return false;
+    }
+    return true;
+}
+function getCachedUsageResult(cache) {
+    if (cache.rateLimited) {
+        if (!hasUsableStaleData(cache) && cache.data) {
+            return { rateLimits: null, error: 'rate_limited' };
+        }
+        return { rateLimits: cache.data, error: 'rate_limited', stale: cache.data ? true : undefined };
+    }
+    if (cache.error) {
+        const errorReason = cache.errorReason || 'network';
+        if (hasUsableStaleData(cache)) {
+            return { rateLimits: cache.data, error: errorReason, stale: true };
+        }
+        return { rateLimits: null, error: errorReason };
+    }
+    return { rateLimits: cache.data };
+}
+function createRateLimitedCacheEntry(source, data, pollIntervalMs, previousCount, lastSuccessAt) {
+    const timestamp = Date.now();
+    const rateLimitedCount = previousCount + 1;
+    return {
+        timestamp,
+        data,
+        error: false,
+        errorReason: 'rate_limited',
+        source,
+        rateLimited: true,
+        rateLimitedCount,
+        rateLimitedUntil: timestamp + getRateLimitedBackoffMs(pollIntervalMs, rateLimitedCount),
+        lastSuccessAt,
+    };
+}
+/**
+ * Get the Keychain service name for the current config directory.
+ * Claude Code uses "Claude Code-credentials-{sha256(configDir)[:8]}" for non-default dirs.
+ */
+function getKeychainServiceName() {
+    const configDir = process.env.CLAUDE_CONFIG_DIR;
+    if (configDir) {
+        const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+        return `Claude Code-credentials-${hash}`;
+    }
+    return 'Claude Code-credentials';
+}
+function isCredentialExpired(creds) {
+    return creds.expiresAt != null && creds.expiresAt <= Date.now();
+}
+function readKeychainCredential(serviceName, account) {
+    try {
+        const args = account
+            ? ['find-generic-password', '-s', serviceName, '-a', account, '-w']
+            : ['find-generic-password', '-s', serviceName, '-w'];
+        const result = execFileSync('/usr/bin/security', args, {
+            encoding: 'utf-8',
+            timeout: 2000,
+            stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        if (!result)
+            return null;
+        const parsed = JSON.parse(result);
+        // Handle nested structure (claudeAiOauth wrapper)
+        const creds = parsed.claudeAiOauth || parsed;
+        if (!creds.accessToken)
+            return null;
+        return {
+            accessToken: creds.accessToken,
+            expiresAt: creds.expiresAt,
+            refreshToken: creds.refreshToken,
+            source: 'keychain',
+        };
+    }
+    catch {
+        return null;
+    }
 }
 /**
  * Read OAuth credentials from macOS Keychain
@@ -92,33 +244,36 @@ function isCacheValid(cache) {
 function readKeychainCredentials() {
     if (process.platform !== 'darwin')
         return null;
+    const serviceName = getKeychainServiceName();
+    const candidateAccounts = [];
     try {
-        const result = execSync('/usr/bin/security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', { encoding: 'utf-8', timeout: 2000 }).trim();
-        if (!result)
-            return null;
-        const parsed = JSON.parse(result);
-        // Handle nested structure (claudeAiOauth wrapper)
-        const creds = parsed.claudeAiOauth || parsed;
-        if (creds.accessToken) {
-            return {
-                accessToken: creds.accessToken,
-                expiresAt: creds.expiresAt,
-                refreshToken: creds.refreshToken,
-                source: 'keychain',
-            };
+        const username = userInfo().username?.trim();
+        if (username) {
+            candidateAccounts.push(username);
         }
     }
     catch {
-        // Keychain access failed
+        // Best-effort only; fall back to the legacy service-only lookup below.
     }
-    return null;
+    candidateAccounts.push(undefined);
+    let expiredFallback = null;
+    for (const account of candidateAccounts) {
+        const creds = readKeychainCredential(serviceName, account);
+        if (!creds)
+            continue;
+        if (!isCredentialExpired(creds)) {
+            return creds;
+        }
+        expiredFallback ??= creds;
+    }
+    return expiredFallback;
 }
 /**
  * Read OAuth credentials from file fallback
  */
 function readFileCredentials() {
     try {
-        const credPath = join(homedir(), '.claude/.credentials.json');
+        const credPath = join(getClaudeConfigDir(), '.credentials.json');
         if (!existsSync(credPath))
             return null;
         const content = readFileSync(credPath, 'utf-8');
@@ -156,12 +311,7 @@ function getCredentials() {
 function validateCredentials(creds) {
     if (!creds.accessToken)
         return false;
-    if (creds.expiresAt != null) {
-        const now = Date.now();
-        if (creds.expiresAt <= now)
-            return false;
-    }
-    return true;
+    return !isCredentialExpired(creds);
 }
 /**
  * Attempt to refresh an expired OAuth access token using the refresh token.
@@ -240,23 +390,94 @@ function fetchUsageFromApi(accessToken) {
             res.on('end', () => {
                 if (res.statusCode === 200) {
                     try {
-                        resolve(JSON.parse(data));
+                        resolve({ data: JSON.parse(data) });
                     }
                     catch {
-                        resolve(null);
+                        resolve({ data: null });
                     }
                 }
+                else if (res.statusCode === 429) {
+                    if (process.env.OMC_DEBUG) {
+                        console.error(`[usage-api] Anthropic API returned 429 (rate limited)`);
+                    }
+                    resolve({ data: null, rateLimited: true });
+                }
                 else {
-                    resolve(null);
+                    resolve({ data: null });
                 }
             });
         });
-        req.on('error', () => resolve(null));
+        req.on('error', () => resolve({ data: null }));
         req.on('timeout', () => {
             req.destroy();
-            resolve(null);
+            resolve({ data: null });
         });
         req.end();
+    });
+}
+/**
+ * Fetch usage from z.ai GLM API
+ */
+function fetchUsageFromZai() {
+    return new Promise((resolve) => {
+        const baseUrl = process.env.ANTHROPIC_BASE_URL;
+        const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+        if (!baseUrl || !authToken) {
+            resolve({ data: null });
+            return;
+        }
+        // Validate baseUrl for SSRF protection
+        const validation = validateAnthropicBaseUrl(baseUrl);
+        if (!validation.allowed) {
+            console.error(`[SSRF Guard] Blocking usage API call: ${validation.reason}`);
+            resolve({ data: null });
+            return;
+        }
+        try {
+            const url = new URL(baseUrl);
+            const baseDomain = `${url.protocol}//${url.host}`;
+            const quotaLimitUrl = `${baseDomain}/api/monitor/usage/quota/limit`;
+            const urlObj = new URL(quotaLimitUrl);
+            const req = https.request({
+                hostname: urlObj.hostname,
+                path: urlObj.pathname,
+                method: 'GET',
+                headers: {
+                    'Authorization': authToken,
+                    'Content-Type': 'application/json',
+                    'Accept-Language': 'en-US,en',
+                },
+                timeout: API_TIMEOUT_MS,
+            }, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    if (res.statusCode === 200) {
+                        try {
+                            resolve({ data: JSON.parse(data) });
+                        }
+                        catch {
+                            resolve({ data: null });
+                        }
+                    }
+                    else if (res.statusCode === 429) {
+                        if (process.env.OMC_DEBUG) {
+                            console.error(`[usage-api] z.ai API returned 429 (rate limited)`);
+                        }
+                        resolve({ data: null, rateLimited: true });
+                    }
+                    else {
+                        resolve({ data: null });
+                    }
+                });
+            });
+            req.on('error', () => resolve({ data: null }));
+            req.on('timeout', () => { req.destroy(); resolve({ data: null }); });
+            req.end();
+        }
+        catch {
+            resolve({ data: null });
+        }
     });
 }
 /**
@@ -266,7 +487,7 @@ function fetchUsageFromApi(accessToken) {
  */
 function writeBackCredentials(creds) {
     try {
-        const credPath = join(homedir(), '.claude/.credentials.json');
+        const credPath = join(getClaudeConfigDir(), '.credentials.json');
         if (!existsSync(credPath))
             return;
         const content = readFileSync(credPath, 'utf-8');
@@ -318,6 +539,14 @@ function writeBackCredentials(creds) {
     }
 }
 /**
+ * Clamp values to 0-100 and filter invalid
+ */
+function clamp(v) {
+    if (v == null || !isFinite(v))
+        return 0;
+    return Math.max(0, Math.min(100, v));
+}
+/**
  * Parse API response into RateLimits
  */
 function parseUsageResponse(response) {
@@ -326,12 +555,6 @@ function parseUsageResponse(response) {
     // Need at least one valid value
     if (fiveHour == null && sevenDay == null)
         return null;
-    // Clamp values to 0-100 and filter invalid
-    const clamp = (v) => {
-        if (v == null || !isFinite(v))
-            return 0;
-        return Math.max(0, Math.min(100, v));
-    };
     // Parse ISO 8601 date strings to Date objects
     const parseDate = (dateStr) => {
         if (!dateStr)
@@ -359,61 +582,191 @@ function parseUsageResponse(response) {
         result.sonnetWeeklyPercent = clamp(sonnetSevenDay);
         result.sonnetWeeklyResetsAt = parseDate(sonnetResetsAt);
     }
-    // If API doesn't return per-model data, sonnetWeeklyPercent remains undefined
-    // This is more accurate than estimating with arbitrary percentages
+    // Add Opus-specific quota if available from API
+    const opusSevenDay = response.seven_day_opus?.utilization;
+    const opusResetsAt = response.seven_day_opus?.resets_at;
+    if (opusSevenDay != null) {
+        result.opusWeeklyPercent = clamp(opusSevenDay);
+        result.opusWeeklyResetsAt = parseDate(opusResetsAt);
+    }
     return result;
+}
+/**
+ * Parse z.ai API response into RateLimits
+ */
+export function parseZaiResponse(response) {
+    const limits = response.data?.limits;
+    if (!limits || limits.length === 0)
+        return null;
+    const tokensLimit = limits.find(l => l.type === 'TOKENS_LIMIT');
+    const timeLimit = limits.find(l => l.type === 'TIME_LIMIT');
+    if (!tokensLimit && !timeLimit)
+        return null;
+    // Parse nextResetTime (Unix timestamp in milliseconds) to Date
+    const parseResetTime = (timestamp) => {
+        if (!timestamp)
+            return null;
+        try {
+            const date = new Date(timestamp);
+            return isNaN(date.getTime()) ? null : date;
+        }
+        catch {
+            return null;
+        }
+    };
+    return {
+        fiveHourPercent: clamp(tokensLimit?.percentage),
+        fiveHourResetsAt: parseResetTime(tokensLimit?.nextResetTime),
+        // z.ai has no weekly quota; leave weeklyPercent undefined so HUD hides it
+        monthlyPercent: timeLimit ? clamp(timeLimit.percentage) : undefined,
+        monthlyResetsAt: timeLimit ? (parseResetTime(timeLimit.nextResetTime) ?? null) : undefined,
+    };
 }
 /**
  * Get usage data (with caching)
  *
- * Returns null if:
- * - No OAuth credentials available (API users)
- * - Credentials expired
- * - API call failed
+ * Returns a UsageResult with:
+ * - rateLimits: RateLimits on success, null on failure/no credentials
+ * - error: categorized reason when API call fails (undefined on success or no credentials)
+ *   - 'network': API call failed (timeout, HTTP error, parse error)
+ *   - 'auth': credentials expired and refresh failed
+ *   - 'no_credentials': no OAuth credentials available (expected for API key users)
+ *   - 'rate_limited': API returned 429; stale data served if available, with exponential backoff
  */
 export async function getUsage() {
-    // Check cache first
-    const cache = readCache();
-    if (cache && isCacheValid(cache)) {
-        return cache.data;
+    const baseUrl = process.env.ANTHROPIC_BASE_URL;
+    const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    const isZai = baseUrl != null && isZaiHost(baseUrl);
+    const currentSource = isZai && authToken ? 'zai' : 'anthropic';
+    const pollIntervalMs = getUsagePollIntervalMs();
+    const initialCache = readCache();
+    if (initialCache && isCacheValid(initialCache, pollIntervalMs) && initialCache.source === currentSource) {
+        return getCachedUsageResult(initialCache);
     }
-    // Get credentials
-    let creds = getCredentials();
-    if (!creds) {
-        writeCache(null, true);
-        return null;
-    }
-    // If credentials are expired, attempt token refresh
-    if (!validateCredentials(creds)) {
-        if (creds.refreshToken) {
-            const refreshed = await refreshAccessToken(creds.refreshToken);
-            if (refreshed) {
-                // Update in-memory credentials
-                creds = { ...creds, ...refreshed };
-                // Persist refreshed credentials back to store
-                writeBackCredentials(creds);
+    try {
+        return await withFileLock(lockPathFor(getCachePath()), async () => {
+            const cache = readCache();
+            if (cache && isCacheValid(cache, pollIntervalMs) && cache.source === currentSource) {
+                return getCachedUsageResult(cache);
             }
-            else {
-                // Refresh failed - fall through to return null
-                writeCache(null, true);
-                return null;
+            // z.ai path (must precede OAuth check to avoid stale Anthropic credentials)
+            if (isZai && authToken) {
+                const result = await fetchUsageFromZai();
+                const cachedZai = cache?.source === 'zai' ? cache : null;
+                if (result.rateLimited) {
+                    const prevLastSuccess = cachedZai?.lastSuccessAt;
+                    const rateLimitedCache = createRateLimitedCacheEntry('zai', cachedZai?.data || null, pollIntervalMs, cachedZai?.rateLimitedCount || 0, prevLastSuccess);
+                    writeCache({
+                        data: rateLimitedCache.data,
+                        error: rateLimitedCache.error,
+                        source: rateLimitedCache.source,
+                        rateLimited: true,
+                        rateLimitedCount: rateLimitedCache.rateLimitedCount,
+                        rateLimitedUntil: rateLimitedCache.rateLimitedUntil,
+                        errorReason: 'rate_limited',
+                        lastSuccessAt: rateLimitedCache.lastSuccessAt,
+                    });
+                    if (rateLimitedCache.data) {
+                        if (prevLastSuccess && Date.now() - prevLastSuccess > MAX_STALE_DATA_MS) {
+                            return { rateLimits: null, error: 'rate_limited' };
+                        }
+                        return { rateLimits: rateLimitedCache.data, error: 'rate_limited', stale: true };
+                    }
+                    return { rateLimits: null, error: 'rate_limited' };
+                }
+                if (!result.data) {
+                    const fallbackData = hasUsableStaleData(cachedZai) ? cachedZai.data : null;
+                    writeCache({
+                        data: fallbackData,
+                        error: true,
+                        source: 'zai',
+                        errorReason: 'network',
+                        lastSuccessAt: cachedZai?.lastSuccessAt,
+                    });
+                    if (fallbackData) {
+                        return { rateLimits: fallbackData, error: 'network', stale: true };
+                    }
+                    return { rateLimits: null, error: 'network' };
+                }
+                const usage = parseZaiResponse(result.data);
+                writeCache({ data: usage, error: !usage, source: 'zai', lastSuccessAt: Date.now() });
+                return { rateLimits: usage };
             }
-        }
-        else {
-            // No refresh token available
-            writeCache(null, true);
-            return null;
-        }
+            // Anthropic OAuth path (official Claude Code support)
+            let creds = getCredentials();
+            if (creds) {
+                const cachedAnthropic = cache?.source === 'anthropic' ? cache : null;
+                if (!validateCredentials(creds)) {
+                    if (creds.refreshToken) {
+                        const refreshed = await refreshAccessToken(creds.refreshToken);
+                        if (refreshed) {
+                            creds = { ...creds, ...refreshed };
+                            writeBackCredentials(creds);
+                        }
+                        else {
+                            writeCache({ data: null, error: true, source: 'anthropic', errorReason: 'auth' });
+                            return { rateLimits: null, error: 'auth' };
+                        }
+                    }
+                    else {
+                        writeCache({ data: null, error: true, source: 'anthropic', errorReason: 'auth' });
+                        return { rateLimits: null, error: 'auth' };
+                    }
+                }
+                const result = await fetchUsageFromApi(creds.accessToken);
+                if (result.rateLimited) {
+                    const prevLastSuccess = cachedAnthropic?.lastSuccessAt;
+                    const rateLimitedCache = createRateLimitedCacheEntry('anthropic', cachedAnthropic?.data || null, pollIntervalMs, cachedAnthropic?.rateLimitedCount || 0, prevLastSuccess);
+                    writeCache({
+                        data: rateLimitedCache.data,
+                        error: rateLimitedCache.error,
+                        source: rateLimitedCache.source,
+                        rateLimited: true,
+                        rateLimitedCount: rateLimitedCache.rateLimitedCount,
+                        rateLimitedUntil: rateLimitedCache.rateLimitedUntil,
+                        errorReason: 'rate_limited',
+                        lastSuccessAt: rateLimitedCache.lastSuccessAt,
+                    });
+                    if (rateLimitedCache.data) {
+                        if (prevLastSuccess && Date.now() - prevLastSuccess > MAX_STALE_DATA_MS) {
+                            return { rateLimits: null, error: 'rate_limited' };
+                        }
+                        return { rateLimits: rateLimitedCache.data, error: 'rate_limited', stale: true };
+                    }
+                    return { rateLimits: null, error: 'rate_limited' };
+                }
+                if (!result.data) {
+                    const fallbackData = hasUsableStaleData(cachedAnthropic) ? cachedAnthropic.data : null;
+                    writeCache({
+                        data: fallbackData,
+                        error: true,
+                        source: 'anthropic',
+                        errorReason: 'network',
+                        lastSuccessAt: cachedAnthropic?.lastSuccessAt,
+                    });
+                    if (fallbackData) {
+                        return { rateLimits: fallbackData, error: 'network', stale: true };
+                    }
+                    return { rateLimits: null, error: 'network' };
+                }
+                const usage = parseUsageResponse(result.data);
+                writeCache({ data: usage, error: !usage, source: 'anthropic', lastSuccessAt: Date.now() });
+                return { rateLimits: usage };
+            }
+            writeCache({ data: null, error: true, source: 'anthropic', errorReason: 'no_credentials' });
+            return { rateLimits: null, error: 'no_credentials' };
+        }, USAGE_CACHE_LOCK_OPTS);
     }
-    // Fetch from API
-    const response = await fetchUsageFromApi(creds.accessToken);
-    if (!response) {
-        writeCache(null, true);
-        return null;
+    catch (err) {
+        // Lock acquisition failed — return stale cache without touching the cache file
+        // to avoid racing with the lock holder writing fresh data
+        if (err instanceof Error && err.message.startsWith('Failed to acquire file lock')) {
+            if (initialCache?.data) {
+                return { rateLimits: initialCache.data, stale: true };
+            }
+            return { rateLimits: null, error: 'network' };
+        }
+        return { rateLimits: null, error: 'network' };
     }
-    // Parse response
-    const usage = parseUsageResponse(response);
-    writeCache(usage, !usage);
-    return usage;
 }
 //# sourceMappingURL=usage-api.js.map

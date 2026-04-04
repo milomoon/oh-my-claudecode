@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
-import { tmpdir, homedir } from 'os';
+import { tmpdir } from 'os';
 import { getTeamMembers } from '../unified-team.js';
 import { registerMcpWorker } from '../team-registration.js';
 import { writeHeartbeat } from '../heartbeat.js';
@@ -23,7 +23,7 @@ describe('unified-team', () => {
       teamName,
       name,
       agentType === 'mcp-codex' ? 'codex' : 'gemini',
-      agentType === 'mcp-codex' ? 'gpt-5.3-codex' : 'gemini-3-pro-preview',
+      agentType === 'mcp-codex' ? 'gpt-5.3-codex' : 'gemini-3.1-pro-preview',
       `tmux-${name}`,
       testDir,
       testDir

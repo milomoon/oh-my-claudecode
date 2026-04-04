@@ -5,21 +5,37 @@
  * Reference: https://github.com/EvanOman/cc-wait
  */
 
+import type { UsageErrorReason } from '../../hud/types.js';
+
 export interface RateLimitStatus {
   /** Whether rate limited on 5-hour window */
   fiveHourLimited: boolean;
   /** Whether rate limited on weekly window */
   weeklyLimited: boolean;
-  /** Combined: true if either limit is hit */
+  /** Whether rate limited on monthly window (if available from API) */
+  monthlyLimited: boolean;
+  /** Combined: true if any limit is hit */
   isLimited: boolean;
   /** When 5-hour limit resets */
   fiveHourResetsAt: Date | null;
   /** When weekly limit resets */
   weeklyResetsAt: Date | null;
+  /** When monthly limit resets (if available from API) */
+  monthlyResetsAt: Date | null;
   /** Earliest reset time */
   nextResetAt: Date | null;
   /** Time until reset in milliseconds */
   timeUntilResetMs: number | null;
+  /** Latest 5-hour usage percentage if available */
+  fiveHourPercent?: number;
+  /** Latest weekly usage percentage if available */
+  weeklyPercent?: number;
+  /** Latest monthly usage percentage if available */
+  monthlyPercent?: number;
+  /** Error reason from the underlying usage API call, if any */
+  apiErrorReason?: UsageErrorReason;
+  /** Whether the returned usage data came from stale cache */
+  usingStaleData?: boolean;
   /** Last check timestamp */
   lastCheckedAt: Date;
 }
@@ -97,11 +113,11 @@ export interface DaemonConfig {
   paneLinesToCapture?: number;
   /** Whether to log verbose output (default: false) */
   verbose?: boolean;
-  /** State file path (default: ~/.omc/state/rate-limit-daemon.json) */
+  /** State file path (default: XDG-aware global OMC state path) */
   stateFilePath?: string;
-  /** PID file path (default: ~/.omc/state/rate-limit-daemon.pid) */
+  /** PID file path (default: XDG-aware global OMC state path) */
   pidFilePath?: string;
-  /** Log file path (default: ~/.omc/state/rate-limit-daemon.log) */
+  /** Log file path (default: XDG-aware global OMC state path) */
   logFilePath?: string;
 }
 

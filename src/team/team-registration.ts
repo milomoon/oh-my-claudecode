@@ -9,16 +9,17 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../utils/paths.js';
 import type { McpWorkerMember, ConfigProbeResult } from './types.js';
 import { sanitizeName } from './tmux-session.js';
 import { atomicWriteJson, validateResolvedPath } from './fs-utils.js';
+import { withFileLockSync } from '../lib/file-lock.js';
 
 // --- Config paths ---
 
 function configPath(teamName: string): string {
-  const result = join(homedir(), '.claude', 'teams', sanitizeName(teamName), 'config.json');
-  validateResolvedPath(result, join(homedir(), '.claude', 'teams'));
+  const result = join(getClaudeConfigDir(), 'teams', sanitizeName(teamName), 'config.json');
+  validateResolvedPath(result, join(getClaudeConfigDir(), 'teams'));
   return result;
 }
 
@@ -76,7 +77,7 @@ export function getRegistrationStrategy(workingDirectory: string): 'config' | 's
 export function registerMcpWorker(
   teamName: string,
   workerName: string,
-  provider: 'codex' | 'gemini',
+  provider: 'codex' | 'gemini' | 'claude',
   model: string,
   tmuxTarget: string,
   cwd: string,
@@ -128,25 +129,28 @@ function registerInConfig(teamName: string, member: McpWorkerMember): void {
 
 function registerInShadow(workingDirectory: string, teamName: string, member: McpWorkerMember): void {
   const filePath = shadowRegistryPath(workingDirectory);
+  const lockPath = filePath + '.lock';
 
-  let registry: { teamName: string; workers: McpWorkerMember[] };
+  withFileLockSync(lockPath, () => {
+    let registry: { teamName: string; workers: McpWorkerMember[] };
 
-  if (existsSync(filePath)) {
-    try {
-      registry = JSON.parse(readFileSync(filePath, 'utf-8'));
-    } catch {
+    if (existsSync(filePath)) {
+      try {
+        registry = JSON.parse(readFileSync(filePath, 'utf-8'));
+      } catch {
+        registry = { teamName, workers: [] };
+      }
+    } else {
       registry = { teamName, workers: [] };
     }
-  } else {
-    registry = { teamName, workers: [] };
-  }
 
-  // Remove existing entry for this worker
-  registry.workers = (registry.workers || []).filter(w => w.name !== member.name);
-  registry.workers.push(member);
-  registry.teamName = teamName;
+    // Remove existing entry for this worker
+    registry.workers = (registry.workers || []).filter(w => w.name !== member.name);
+    registry.workers.push(member);
+    registry.teamName = teamName;
 
-  atomicWriteJson(filePath, registry);
+    atomicWriteJson(filePath, registry);
+  });
 }
 
 /**

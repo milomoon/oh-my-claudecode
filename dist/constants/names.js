@@ -9,11 +9,9 @@ export const MODES = {
     AUTOPILOT: 'autopilot',
     RALPH: 'ralph',
     ULTRAWORK: 'ultrawork',
-    ULTRAPILOT: 'ultrapilot',
     ULTRAQA: 'ultraqa',
-    ECOMODE: 'ecomode',
     TEAM: 'team',
-    PIPELINE: 'pipeline',
+    RALPLAN: 'ralplan',
 };
 // Tool categories
 export const TOOL_CATEGORIES = {
@@ -25,8 +23,11 @@ export const TOOL_CATEGORIES = {
     MEMORY: 'memory',
     TRACE: 'trace',
     SKILLS: 'skills',
+    INTEROP: 'interop',
     CODEX: 'codex',
     GEMINI: 'gemini',
+    SHARED_MEMORY: 'shared-memory',
+    DEEPINIT: 'deepinit',
 };
 // Hook event names
 export const HOOK_EVENTS = {

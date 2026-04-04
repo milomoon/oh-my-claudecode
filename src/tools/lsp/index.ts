@@ -2,7 +2,7 @@
  * LSP Module Exports
  */
 
-export { LspClient, lspClientManager, disconnectAll } from './client.js';
+export { LspClient, lspClientManager, disconnectAll, DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './client.js';
 export type {
   Position,
   Range,
@@ -23,6 +23,15 @@ export {
   commandExists
 } from './servers.js';
 export type { LspServerConfig } from './servers.js';
+
+export {
+  resolveDevContainerContext,
+  hostPathToContainerPath,
+  containerPathToHostPath,
+  hostUriToContainerUri,
+  containerUriToHostUri
+} from './devcontainer.js';
+export type { DevContainerContext } from './devcontainer.js';
 
 export {
   uriToPath,

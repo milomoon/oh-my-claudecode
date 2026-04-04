@@ -7,13 +7,14 @@
  */
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../utils/paths.js';
 import { sanitizeName } from './tmux-session.js';
 import { atomicWriteJson, validateResolvedPath } from './fs-utils.js';
+import { withFileLockSync } from '../lib/file-lock.js';
 // --- Config paths ---
 function configPath(teamName) {
-    const result = join(homedir(), '.claude', 'teams', sanitizeName(teamName), 'config.json');
-    validateResolvedPath(result, join(homedir(), '.claude', 'teams'));
+    const result = join(getClaudeConfigDir(), 'teams', sanitizeName(teamName), 'config.json');
+    validateResolvedPath(result, join(getClaudeConfigDir(), 'teams'));
     return result;
 }
 function shadowRegistryPath(workingDirectory) {
@@ -103,23 +104,26 @@ function registerInConfig(teamName, member) {
 }
 function registerInShadow(workingDirectory, teamName, member) {
     const filePath = shadowRegistryPath(workingDirectory);
-    let registry;
-    if (existsSync(filePath)) {
-        try {
-            registry = JSON.parse(readFileSync(filePath, 'utf-8'));
+    const lockPath = filePath + '.lock';
+    withFileLockSync(lockPath, () => {
+        let registry;
+        if (existsSync(filePath)) {
+            try {
+                registry = JSON.parse(readFileSync(filePath, 'utf-8'));
+            }
+            catch {
+                registry = { teamName, workers: [] };
+            }
         }
-        catch {
+        else {
             registry = { teamName, workers: [] };
         }
-    }
-    else {
-        registry = { teamName, workers: [] };
-    }
-    // Remove existing entry for this worker
-    registry.workers = (registry.workers || []).filter(w => w.name !== member.name);
-    registry.workers.push(member);
-    registry.teamName = teamName;
-    atomicWriteJson(filePath, registry);
+        // Remove existing entry for this worker
+        registry.workers = (registry.workers || []).filter(w => w.name !== member.name);
+        registry.workers.push(member);
+        registry.teamName = teamName;
+        atomicWriteJson(filePath, registry);
+    });
 }
 /**
  * Unregister an MCP worker from the team.

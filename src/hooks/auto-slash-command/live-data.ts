@@ -18,9 +18,13 @@
 import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import safe from "safe-regex";
+import { getWorktreeRoot, getOmcRoot } from "../../lib/worktree-paths.js";
 
 const TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_CACHE_SIZE = 200;
+const MAX_ONCE_COMMANDS = 500;
 
 // Pre-compiled regex patterns for performance
 const LIVE_DATA_LINE_PATTERN = /^\s*!(.+)/;
@@ -97,7 +101,26 @@ function setCache(
   ttl: number,
 ): void {
   if (ttl <= 0) return;
+
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) cache.delete(firstKey);
+  }
+
   cache.set(command, { output, error, cachedAt: Date.now(), ttl });
+}
+
+function markCommandExecuted(command: string): void {
+  if (onceCommands.has(command)) {
+    return;
+  }
+
+  if (onceCommands.size >= MAX_ONCE_COMMANDS) {
+    const firstKey = onceCommands.values().next().value;
+    if (firstKey !== undefined) onceCommands.delete(firstKey);
+  }
+
+  onceCommands.add(command);
 }
 
 /** Clear all caches (useful for testing) */
@@ -112,9 +135,10 @@ let cachedPolicy: SecurityPolicy | null = null;
 let policyLoadedFrom: string | null = null;
 
 function loadSecurityPolicy(): SecurityPolicy {
+  const root = getWorktreeRoot() || process.cwd();
   const policyPaths = [
-    join(process.cwd(), ".omc", "config", "live-data-policy.json"),
-    join(process.cwd(), ".claude", "live-data-policy.json"),
+    join(getOmcRoot(root), "config", "live-data-policy.json"),
+    join(root, ".claude", "live-data-policy.json"),
   ];
 
   for (const p of policyPaths) {
@@ -140,11 +164,17 @@ export function resetSecurityPolicy(): void {
 
 function checkSecurity(command: string): { allowed: boolean; reason?: string } {
   const policy = loadSecurityPolicy();
+  const cmdBase = command.split(WHITESPACE_SPLIT_PATTERN)[0];
 
-  // Check denied patterns first
+  // Check denied patterns first (always enforced)
   if (policy.denied_patterns) {
     for (const pat of policy.denied_patterns) {
       try {
+        if (!safe(pat)) {
+          // Unsafe regex in deny list: block the command to fail closed.
+          // A ReDoS-capable pattern is treated as a blanket deny.
+          return { allowed: false, reason: `unsafe regex rejected: ${pat}` };
+        }
         if (new RegExp(pat).test(command)) {
           return { allowed: false, reason: `denied by pattern: ${pat}` };
         }
@@ -155,36 +185,56 @@ function checkSecurity(command: string): { allowed: boolean; reason?: string } {
   }
 
   if (policy.denied_commands) {
-    const cmdBase = command.split(WHITESPACE_SPLIT_PATTERN)[0];
     if (policy.denied_commands.includes(cmdBase)) {
       return { allowed: false, reason: `command '${cmdBase}' is denied` };
     }
   }
 
-  if (policy.allowed_commands && policy.allowed_commands.length > 0) {
-    const cmdBase = command.split(WHITESPACE_SPLIT_PATTERN)[0];
-    const baseAllowed = policy.allowed_commands.includes(cmdBase);
-    let patternAllowed = false;
+  // Default-deny: if an allowlist is configured, command MUST match it
+  // If no allowlist is configured at all, deny by default for safety
+  const hasAllowlist =
+    (policy.allowed_commands && policy.allowed_commands.length > 0) ||
+    (policy.allowed_patterns && policy.allowed_patterns.length > 0);
 
-    if (policy.allowed_patterns) {
-      for (const pat of policy.allowed_patterns) {
-        try {
-          if (new RegExp(pat).test(command)) {
-            patternAllowed = true;
-            break;
-          }
-        } catch {
-          // skip invalid regex
+  if (!hasAllowlist) {
+    return {
+      allowed: false,
+      reason: `no allowlist configured - command execution blocked by default`,
+    };
+  }
+
+  // Check if command matches allowlist
+  let baseAllowed = false;
+  let patternAllowed = false;
+
+  if (policy.allowed_commands) {
+    baseAllowed = policy.allowed_commands.includes(cmdBase);
+  }
+
+  if (policy.allowed_patterns) {
+    for (const pat of policy.allowed_patterns) {
+      try {
+        if (!safe(pat)) {
+          // Unsafe regex in allow list: skip to fail closed.
+          // The pattern cannot grant access — remaining patterns
+          // or allowed_commands may still match.
+          continue;
         }
+        if (new RegExp(pat).test(command)) {
+          patternAllowed = true;
+          break;
+        }
+      } catch {
+        // skip invalid regex
       }
     }
+  }
 
-    if (!baseAllowed && !patternAllowed) {
-      return {
-        allowed: false,
-        reason: `command '${cmdBase}' not in allowlist`,
-      };
-    }
+  if (!baseAllowed && !patternAllowed) {
+    return {
+      allowed: false,
+      reason: `command '${cmdBase}' not in allowlist`,
+    };
   }
 
   return { allowed: true };
@@ -209,6 +259,10 @@ function getCodeBlockRanges(lines: string[]): Array<[number, number]> {
         openIndex = null;
       }
     }
+  }
+  // Unclosed fence: treat every line after the opening fence as inside a code block
+  if (openIndex !== null) {
+    ranges.push([openIndex, lines.length]);
   }
   return ranges;
 }
@@ -356,6 +410,18 @@ function executeCommand(command: string): { stdout: string; error: boolean } {
   }
 }
 
+// ─── HTML Escaping ───────────────────────────────────────────────────────────
+
+/** Escape characters that are special in XML/HTML attributes and content. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // ─── Output Formatting ──────────────────────────────────────────────────────
 
 function formatOutput(
@@ -364,6 +430,8 @@ function formatOutput(
   error: boolean,
   format: OutputFormat,
 ): string {
+  const escapedCommand = escapeHtml(command);
+  const escapedOutput = escapeHtml(output);
   const formatAttr = format ? ` format="${format}"` : "";
   const errorAttr = error ? ' error="true"' : "";
 
@@ -375,10 +443,10 @@ function formatOutput(
         l.replace(DIFF_HEADER_PREFIX_PATTERN, ""),
       ),
     ).size;
-    return `<live-data command="${command}"${formatAttr} files="${files}" +="${addLines}" -="${delLines}"${errorAttr}>${output}</live-data>`;
+    return `<live-data command="${escapedCommand}"${formatAttr} files="${files}" +="${addLines}" -="${delLines}"${errorAttr}>${escapedOutput}</live-data>`;
   }
 
-  return `<live-data command="${command}"${formatAttr}${errorAttr}>${output}</live-data>`;
+  return `<live-data command="${escapedCommand}"${formatAttr}${errorAttr}>${escapedOutput}</live-data>`;
 }
 
 // ─── Multi-line Script Support ───────────────────────────────────────────────
@@ -452,7 +520,7 @@ export function resolveLiveData(content: string): string {
     if (!security.allowed) {
       scriptReplacements.set(
         block.startLine,
-        `<live-data command="script:${block.shell}" error="true">blocked: ${security.reason}</live-data>`,
+        `<live-data command="script:${escapeHtml(block.shell)}" error="true">blocked: ${escapeHtml(security.reason ?? "")}</live-data>`,
       );
       continue;
     }
@@ -468,7 +536,7 @@ export function resolveLiveData(content: string): string {
       });
       scriptReplacements.set(
         block.startLine,
-        `<live-data command="script:${block.shell}">${result ?? ""}</live-data>`,
+        `<live-data command="script:${escapeHtml(block.shell)}">${escapeHtml(result ?? "")}</live-data>`,
       );
     } catch (err: unknown) {
       const message =
@@ -477,7 +545,7 @@ export function resolveLiveData(content: string): string {
           : String(err);
       scriptReplacements.set(
         block.startLine,
-        `<live-data command="script:${block.shell}" error="true">${message}</live-data>`,
+        `<live-data command="script:${escapeHtml(block.shell)}" error="true">${escapeHtml(message)}</live-data>`,
       );
     }
   }
@@ -504,7 +572,7 @@ export function resolveLiveData(content: string): string {
     const security = checkSecurity(directive.command);
     if (!security.allowed) {
       result.push(
-        `<live-data command="${directive.command}" error="true">blocked: ${security.reason}</live-data>`,
+        `<live-data command="${escapeHtml(directive.command)}" error="true">blocked: ${escapeHtml(security.reason ?? "")}</live-data>`,
       );
       continue;
     }
@@ -513,7 +581,7 @@ export function resolveLiveData(content: string): string {
       case "if-modified": {
         if (!checkIfModified(directive.pattern!)) {
           result.push(
-            `<live-data command="${directive.command}" skipped="true">condition not met: no files matching '${directive.pattern}' modified</live-data>`,
+            `<live-data command="${escapeHtml(directive.command)}" skipped="true">condition not met: no files matching '${escapeHtml(directive.pattern!)}' modified</live-data>`,
           );
         } else {
           const { stdout, error } = executeCommand(directive.command);
@@ -525,7 +593,7 @@ export function resolveLiveData(content: string): string {
       case "if-branch": {
         if (!checkIfBranch(directive.pattern!)) {
           result.push(
-            `<live-data command="${directive.command}" skipped="true">condition not met: branch does not match '${directive.pattern}'</live-data>`,
+            `<live-data command="${escapeHtml(directive.command)}" skipped="true">condition not met: branch does not match '${escapeHtml(directive.pattern!)}'</live-data>`,
           );
         } else {
           const { stdout, error } = executeCommand(directive.command);
@@ -537,10 +605,10 @@ export function resolveLiveData(content: string): string {
       case "only-once": {
         if (onceCommands.has(directive.command)) {
           result.push(
-            `<live-data command="${directive.command}" skipped="true">already executed this session</live-data>`,
+            `<live-data command="${escapeHtml(directive.command)}" skipped="true">already executed this session</live-data>`,
           );
         } else {
-          onceCommands.add(directive.command);
+          markCommandExecuted(directive.command);
           const { stdout, error } = executeCommand(directive.command);
           result.push(formatOutput(directive.command, stdout, error, null));
         }

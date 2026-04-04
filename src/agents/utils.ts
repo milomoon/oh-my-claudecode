@@ -8,7 +8,7 @@
  */
 
 import { readFileSync } from 'fs';
-import { join, dirname, resolve, relative, isAbsolute } from 'path';
+import { join, dirname, basename, resolve, relative, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
 
 import type {
@@ -18,24 +18,70 @@ import type {
   AgentOverrideConfig,
   ModelType
 } from './types.js';
-
 // ============================================================
 // DYNAMIC PROMPT LOADING
 // ============================================================
 
 /**
- * Get the package root directory (where agents/ folder lives)
+ * Build-time injected agent prompts map.
+ * esbuild replaces this with a { role: "prompt content" } object during bridge builds.
+ * In dev/test (unbundled), this remains undefined and we fall back to runtime file reads.
+ */
+declare const __AGENT_PROMPTS__: Record<string, string> | undefined;
+
+/**
+ * Get the package root directory (where agents/ folder lives).
+ * Handles both ESM (import.meta.url) and CJS bundle (__dirname) contexts.
+ * In CJS bundles, __dirname is always reliable and should take precedence.
+ * This avoids path skew when import.meta.url is shimmed during bundling.
  */
 function getPackageDir(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // From src/agents/ go up to package root
-  return join(__dirname, '..', '..');
+  // __dirname is available in bundled CJS and in some test transpilation contexts.
+  if (typeof __dirname !== 'undefined' && __dirname) {
+    const currentDirName = basename(__dirname);
+    const parentDirName = basename(dirname(__dirname));
+
+    // Bundled CLI path: bridge/cli.cjs -> package root is one level up.
+    if (currentDirName === 'bridge') {
+      return join(__dirname, '..');
+    }
+
+    // Source/dist module path (src/agents or dist/agents) -> package root is two levels up.
+    if (currentDirName === 'agents' && (parentDirName === 'src' || parentDirName === 'dist')) {
+      return join(__dirname, '..', '..');
+    }
+  }
+
+  // ESM path (works in dev via ts/dist)
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const currentDirName = basename(__dirname);
+    if (currentDirName === 'bridge') {
+      return join(__dirname, '..');
+    }
+    // From src/agents/ or dist/agents/ go up to package root
+    return join(__dirname, '..', '..');
+  } catch {
+    // import.meta.url unavailable — last resort
+  }
+
+  // Last resort
+  return process.cwd();
+}
+
+/**
+ * Strip YAML frontmatter from markdown content.
+ */
+function stripFrontmatter(content: string): string {
+  const match = content.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+  return match ? match[1].trim() : content.trim();
 }
 
 /**
  * Load an agent prompt from /agents/{agentName}.md
- * Strips YAML frontmatter and returns the content
+ * Uses build-time embedded prompts when available (CJS bundles),
+ * falls back to runtime file reads (dev/test environments).
  *
  * Security: Validates agent name to prevent path traversal attacks
  */
@@ -46,6 +92,17 @@ export function loadAgentPrompt(agentName: string): string {
     throw new Error(`Invalid agent name: contains disallowed characters`);
   }
 
+  // Prefer build-time embedded prompts (always available in CJS bundles)
+  try {
+    if (typeof __AGENT_PROMPTS__ !== 'undefined' && __AGENT_PROMPTS__ !== null) {
+      const prompt = __AGENT_PROMPTS__[agentName];
+      if (prompt) return prompt;
+    }
+  } catch {
+    // __AGENT_PROMPTS__ not defined — fall through to runtime file read
+  }
+
+  // Runtime fallback: read from filesystem (dev/test environments)
   try {
     const agentsDir = join(getPackageDir(), 'agents');
     const agentPath = join(agentsDir, `${agentName}.md`);
@@ -59,9 +116,7 @@ export function loadAgentPrompt(agentName: string): string {
     }
 
     const content = readFileSync(agentPath, 'utf-8');
-    // Extract content after YAML frontmatter (---\n...\n---\n)
-    const match = content.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
-    return match ? match[1].trim() : content.trim();
+    return stripFrontmatter(content);
   } catch (error) {
     // Don't leak internal paths in error messages
     const message = error instanceof Error && error.message.includes('Invalid agent name')
@@ -109,7 +164,7 @@ export function mergeAgentConfig(
 }
 
 /**
- * Build delegation table section for Sisyphus prompt
+ * Build delegation table section for OMC prompt
  */
 export function buildDelegationTable(availableAgents: AvailableAgent[]): string {
   if (availableAgents.length === 0) {
@@ -194,7 +249,7 @@ export function getAvailableAgents(
 }
 
 /**
- * Build key triggers section for Sisyphus prompt
+ * Build key triggers section for OMC prompt
  */
 export function buildKeyTriggersSection(
   availableAgents: AvailableAgent[]
@@ -278,6 +333,32 @@ export function parseDisallowedTools(agentName: string): string[] | undefined {
 }
 
 /**
+ * Standard path for open questions file
+ */
+export const OPEN_QUESTIONS_PATH = '.omc/plans/open-questions.md';
+
+/**
+ * Format open questions for appending to the standard open-questions.md file.
+ *
+ * @param topic - The plan or analysis topic name
+ * @param questions - Array of { question, reason } objects
+ * @returns Formatted markdown string ready to append
+ */
+export function formatOpenQuestions(
+  topic: string,
+  questions: Array<{ question: string; reason: string }>
+): string {
+  if (questions.length === 0) return '';
+
+  const date = new Date().toISOString().split('T')[0];
+  const items = questions
+    .map(q => `- [ ] ${q.question} — ${q.reason}`)
+    .join('\n');
+
+  return `\n## ${topic} - ${date}\n${items}\n`;
+}
+
+/**
  * Deep merge utility for configurations
  */
 export function deepMerge<T extends Record<string, unknown>>(
@@ -287,6 +368,7 @@ export function deepMerge<T extends Record<string, unknown>>(
   const result = { ...target };
 
   for (const key of Object.keys(source)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     const sourceValue = source[key as keyof T];
     const targetValue = target[key as keyof T];
 

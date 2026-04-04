@@ -12,7 +12,7 @@
  */
 import { z } from 'zod';
 import { lspClientManager, getAllServers, getServerForFile, formatHover, formatLocations, formatDocumentSymbols, formatWorkspaceSymbols, formatDiagnostics, formatCodeActions, formatWorkspaceEdit, countEdits } from './lsp/index.js';
-import { runDirectoryDiagnostics, LSP_DIAGNOSTICS_WAIT_MS } from './diagnostics/index.js';
+import { runDirectoryDiagnostics } from './diagnostics/index.js';
 /**
  * Helper to handle LSP errors gracefully.
  * Uses runWithClientLease to protect the client from idle eviction
@@ -24,6 +24,7 @@ async function withLspClient(filePath, operation, fn) {
         const serverConfig = getServerForFile(filePath);
         if (!serverConfig) {
             return {
+                isError: true,
                 content: [{
                         type: 'text',
                         text: `No language server available for file type: ${filePath}\n\nUse lsp_servers tool to see available language servers.`
@@ -45,6 +46,7 @@ async function withLspClient(filePath, operation, fn) {
         // Surface install hints for missing servers
         if (message.includes('not found')) {
             return {
+                isError: true,
                 content: [{
                         type: 'text',
                         text: `${message}`
@@ -52,6 +54,7 @@ async function withLspClient(filePath, operation, fn) {
             };
         }
         return {
+            isError: true,
             content: [{
                     type: 'text',
                     text: `Error in ${operation}: ${message}`
@@ -171,11 +174,15 @@ export const lspDiagnosticsTool = {
     handler: async (args) => {
         const { file, severity } = args;
         return withLspClient(file, 'diagnostics', async (client) => {
-            // Open the document to trigger diagnostics
             await client.openDocument(file);
-            // Wait a bit for diagnostics to be published
-            await new Promise(resolve => setTimeout(resolve, LSP_DIAGNOSTICS_WAIT_MS));
-            let diagnostics = client.getDiagnostics(file);
+            let diagnostics;
+            if (client.supportsPullDiagnostics) {
+                diagnostics = await client.pullDiagnostics(file);
+            }
+            else {
+                await client.waitForDiagnostics(file, 30_000);
+                diagnostics = client.getDiagnostics(file);
+            }
             if (severity) {
                 const severityMap = {
                     'error': 1,
@@ -378,6 +385,7 @@ export const lspDiagnosticsDirectoryTool = {
         }
         catch (error) {
             return {
+                isError: true,
                 content: [{
                         type: 'text',
                         text: `Error running directory diagnostics: ${error instanceof Error ? error.message : String(error)}`

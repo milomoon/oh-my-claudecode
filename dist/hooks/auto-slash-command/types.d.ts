@@ -1,3 +1,4 @@
+import type { SkillPipelineMetadata } from '../../utils/skill-pipeline.js';
 /**
  * Auto Slash Command Types
  *
@@ -55,6 +56,11 @@ export interface CommandMetadata {
     argumentHint?: string;
     model?: string;
     agent?: string;
+    pipeline?: SkillPipelineMetadata;
+    aliases?: string[];
+    aliasOf?: string;
+    deprecatedAlias?: boolean;
+    deprecationMessage?: string;
 }
 /**
  * Discovered command information

@@ -14,6 +14,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolRequest, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { lspTools } from '../tools/lsp-tools.js';
 import { astTools } from '../tools/ast-tools.js';
 // IMPORTANT: Import from tool.js, NOT index.js!
@@ -24,17 +25,31 @@ import { stateTools } from '../tools/state-tools.js';
 import { notepadTools } from '../tools/notepad-tools.js';
 import { memoryTools } from '../tools/memory-tools.js';
 import { traceTools } from '../tools/trace-tools.js';
+import { registerStandaloneShutdownHandlers } from './standalone-shutdown.js';
+import { cleanupOwnedBridgeSessions } from '../tools/python-repl/bridge-manager.js';
 import { z } from 'zod';
 
 // Tool interface matching our tool definitions
 interface ToolDef {
   name: string;
   description: string;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
   schema: z.ZodRawShape | z.ZodObject<z.ZodRawShape>;
-  handler: (args: unknown) => Promise<{ content: Array<{ type: 'text'; text: string }> }>;
+  handler: (args: unknown) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
 }
 
+type StandaloneCallToolHandler = (
+  request: CallToolRequest,
+) => Promise<CallToolResult>;
+
+type StandaloneCallToolRequestRegistrar = (
+  schema: typeof CallToolRequestSchema,
+  handler: StandaloneCallToolHandler,
+) => void;
+
 // Aggregate all tools - AST tools gracefully degrade if @ast-grep/napi is unavailable
+// Team runtime tools (omc_run_team_start, omc_run_team_status) live in the
+// separate "team" MCP server (bridge/team-mcp.cjs) registered in .mcp.json.
 const allTools: ToolDef[] = [
   ...(lspTools as unknown as ToolDef[]),
   ...(astTools as unknown as ToolDef[]),
@@ -151,12 +166,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       name: tool.name,
       description: tool.description,
       inputSchema: zodToJsonSchema(tool.schema),
+      ...(tool.annotations ? { annotations: tool.annotations } : {}),
     })),
   };
 });
 
 // Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+const setStandaloneCallToolRequestHandler =
+  (server.setRequestHandler as unknown as StandaloneCallToolRequestRegistrar).bind(server);
+
+setStandaloneCallToolRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   const tool = allTools.find(t => t.name === name);
@@ -171,7 +190,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const result = await tool.handler((args ?? {}) as unknown);
     return {
       content: result.content,
-      isError: false,
+      isError: result.isError ?? false,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -180,6 +199,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+});
+
+// Graceful shutdown: disconnect LSP servers on process termination (#768).
+// Without this, LSP child processes (e.g. jdtls) survive the MCP server exit
+// and become orphaned, consuming memory indefinitely.
+// The MCP server process owns the LSP child processes (spawned via
+// child_process.spawn in LspClient.connect), so cleanup must happen here.
+import { disconnectAll as disconnectAllLsp } from '../tools/lsp/index.js';
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  // Hard deadline: exit even if cleanup hangs (e.g. unresponsive LSP server)
+  const forceExitTimer = setTimeout(() => process.exit(1), 5_000);
+  forceExitTimer.unref();
+
+  console.error(`OMC MCP Server: received ${signal}, disconnecting LSP servers...`);
+
+  try {
+    await cleanupOwnedBridgeSessions();
+  } catch {
+    // Best-effort — do not block exit
+  }
+  try {
+    await disconnectAllLsp();
+  } catch {
+    // Best-effort — do not block exit
+  }
+  try {
+    await server.close();
+  } catch {
+    // Best-effort — MCP transport cleanup
+  }
+  process.exit(0);
+}
+
+registerStandaloneShutdownHandlers({
+  onShutdown: gracefulShutdown,
 });
 
 // Start the server

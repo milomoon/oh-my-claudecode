@@ -12,12 +12,12 @@ import {
   readReplayEvents,
   getReplaySummary,
   type ReplayEvent,
-  type ReplaySummary,
 } from '../hooks/subagent-tracker/session-replay.js';
 import {
   validateWorkingDirectory,
 } from '../lib/worktree-paths.js';
 import { ToolDefinition } from './types.js';
+import { sessionSearchTool } from './session-history-tools.js';
 
 // ============================================================================
 // Helpers
@@ -106,12 +106,14 @@ function formatTimelineEvent(event: ReplayEvent): string {
     case 'hook_fire':
       detail = `${event.hook} fired (${event.hook_event})`;
       break;
-    case 'hook_result':
+    case 'hook_result': {
       detail = `${event.hook} result`;
-      if (event.duration_ms) detail += ` (${event.duration_ms}ms`;
-      if (event.context_injected) detail += `, context: ${event.context_length || '?'}B`;
-      if (event.duration_ms) detail += ')';
+      const hookParts: string[] = [];
+      if (event.duration_ms) hookParts.push(`${event.duration_ms}ms`);
+      if (event.context_injected) hookParts.push(`context: ${event.context_length || '?'}B`);
+      if (hookParts.length) detail += ` (${hookParts.join(', ')})`;
       break;
+    }
     case 'keyword_detected':
       detail = `"${event.keyword}" detected`;
       break;
@@ -460,4 +462,4 @@ export const traceSummaryTool: ToolDefinition<{
 /**
  * All trace tools for registration
  */
-export const traceTools = [traceTimelineTool, traceSummaryTool];
+export const traceTools = [traceTimelineTool, traceSummaryTool, sessionSearchTool];

@@ -14,7 +14,6 @@ import type {
   ProjectContext,
   TaskType,
   ComponentRole,
-  FileOwnership,
   DecompositionStrategy
 } from './types.js';
 
@@ -286,12 +285,20 @@ function detectTaskType(task: string): TaskType {
     return 'refactoring';
   }
 
-  if (
-    task.includes('fix') ||
-    task.includes('bug') ||
-    task.includes('error') ||
-    task.includes('issue')
-  ) {
+  // Require 2+ distinct signals to classify as bug-fix, to avoid false positives
+  // (e.g. "resolve the performance issue" should not be classified as bug-fix)
+  const bugFixSignals = [
+    /\bfix\b/,
+    /\bbug\b/,
+    /\berror\b/,
+    /\bissue\b/,
+    /\bbroken\b/,
+    /\bcrash\b/,
+    /\bfailure\b/,
+    /\bregression\b/,
+  ];
+  const bugFixMatches = bugFixSignals.filter((re) => re.test(task)).length;
+  if (bugFixMatches >= 2) {
     return 'bug-fix';
   }
 
@@ -375,7 +382,7 @@ function estimateComplexity(task: string, type: TaskType): number {
   return Math.min(1, score);
 }
 
-function extractAreas(task: string, type: TaskType): string[] {
+function extractAreas(task: string, _type: TaskType): string[] {
   const areas: string[] = [];
 
   const areaKeywords: Record<string, string[]> = {
@@ -437,7 +444,7 @@ function extractTechnologies(
   return Array.from(new Set(techs));
 }
 
-function extractFilePatterns(task: string, context: ProjectContext): string[] {
+function extractFilePatterns(task: string, _context: ProjectContext): string[] {
   const patterns: string[] = [];
 
   // Look for explicit paths
@@ -457,7 +464,7 @@ function extractFilePatterns(task: string, context: ProjectContext): string[] {
 
 function analyzeDependencies(
   areas: string[],
-  type: TaskType
+  _type: TaskType
 ): Array<{ from: string; to: string }> {
   const deps: Array<{ from: string; to: string }> = [];
 
@@ -504,18 +511,20 @@ function selectStrategy(analysis: TaskAnalysis): DecompositionStrategy {
 const fullstackStrategy: DecompositionStrategy = {
   name: 'Fullstack App',
   applicableTypes: ['fullstack-app'],
-  decompose: (analysis, context) => {
+  decompose: (analysis, _context) => {
     const components: Component[] = [];
 
     // Frontend component
     if (analysis.areas.includes('frontend') || analysis.areas.includes('ui')) {
+      // Only depend on backend if a backend component is also being created
+      const frontendDeps = (analysis.areas.includes('backend') || analysis.areas.includes('api')) ? ['backend'] : [];
       components.push({
         id: 'frontend',
         name: 'Frontend',
         role: 'frontend',
         description: 'Frontend UI and components',
         canParallelize: true,
-        dependencies: ['backend'],
+        dependencies: frontendDeps,
         effort: 0.4,
         technologies: analysis.technologies.filter((t) =>
           ['react', 'vue', 'angular', 'next'].includes(t)
@@ -574,7 +583,7 @@ const fullstackStrategy: DecompositionStrategy = {
 const refactoringStrategy: DecompositionStrategy = {
   name: 'Refactoring',
   applicableTypes: ['refactoring'],
-  decompose: (analysis, context) => {
+  decompose: (analysis, _context) => {
     const components: Component[] = [];
 
     // Group by module/directory
@@ -598,7 +607,7 @@ const refactoringStrategy: DecompositionStrategy = {
 const bugFixStrategy: DecompositionStrategy = {
   name: 'Bug Fix',
   applicableTypes: ['bug-fix'],
-  decompose: (analysis, context) => {
+  decompose: (analysis, _context) => {
     // Bug fixes usually not parallelizable
     const components: Component[] = [
       {
@@ -620,7 +629,7 @@ const bugFixStrategy: DecompositionStrategy = {
 const featureStrategy: DecompositionStrategy = {
   name: 'Feature',
   applicableTypes: ['feature'],
-  decompose: (analysis, context) => {
+  decompose: (analysis, _context) => {
     const components: Component[] = [];
 
     // Break down by feature area
@@ -644,7 +653,7 @@ const featureStrategy: DecompositionStrategy = {
 const defaultStrategy: DecompositionStrategy = {
   name: 'Default',
   applicableTypes: [],
-  decompose: (analysis, context) => {
+  decompose: (analysis, _context) => {
     const components: Component[] = [
       {
         id: 'main',
@@ -669,7 +678,7 @@ const defaultStrategy: DecompositionStrategy = {
 function generatePromptForComponent(
   component: Component,
   analysis: TaskAnalysis,
-  context: ProjectContext
+  _context: ProjectContext
 ): string {
   let prompt = `${component.description}\n\n`;
 
@@ -719,7 +728,7 @@ function selectModelTier(component: Component): 'low' | 'medium' | 'high' {
 
 function generateAcceptanceCriteria(
   component: Component,
-  analysis: TaskAnalysis
+  _analysis: TaskAnalysis
 ): string[] {
   const criteria: string[] = [];
 
@@ -747,7 +756,7 @@ function generateAcceptanceCriteria(
 
 function generateVerificationSteps(
   component: Component,
-  analysis: TaskAnalysis
+  _analysis: TaskAnalysis
 ): string[] {
   const steps: string[] = [];
 
@@ -768,7 +777,7 @@ function generateVerificationSteps(
 
 function inferFilePatterns(
   component: Component,
-  context: ProjectContext
+  _context: ProjectContext
 ): string[] {
   const patterns: string[] = [];
 
@@ -807,8 +816,8 @@ function inferFilePatterns(
 }
 
 function inferSpecificFiles(
-  component: Component,
-  context: ProjectContext
+  _component: Component,
+  _context: ProjectContext
 ): string[] {
   const files: string[] = [];
 

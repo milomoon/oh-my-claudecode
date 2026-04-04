@@ -9,7 +9,8 @@
  */
 import * as path from 'path';
 import { execSync } from 'child_process';
-import * as os from 'os';
+import { getOmcRoot } from '../../lib/worktree-paths.js';
+import { getClaudeConfigDir } from '../../utils/paths.js';
 import { existsSync, readFileSync } from 'fs';
 import { HOOK_NAME, ALLOWED_PATH_PATTERNS, WARNED_EXTENSIONS, WRITE_EDIT_TOOLS, DIRECT_WORK_REMINDER, ORCHESTRATOR_DELEGATION_REQUIRED, BOULDER_CONTINUATION_PROMPT, VERIFICATION_REMINDER, SINGLE_TASK_DIRECTIVE, } from './constants.js';
 import { readBoulderState, getPlanProgress, } from '../../features/boulder-state/index.js';
@@ -41,8 +42,8 @@ function getEnforcementLevel(directory) {
         (now - enforcementCache.timestamp) < CACHE_TTL_MS) {
         return enforcementCache.level;
     }
-    const localConfig = path.join(directory, '.omc', 'config.json');
-    const globalConfig = path.join(os.homedir(), '.claude', '.omc-config.json');
+    const localConfig = path.join(getOmcRoot(directory), 'config.json');
+    const globalConfig = path.join(getClaudeConfigDir(), '.omc-config.json');
     let level = 'warn'; // Default
     for (const configPath of [localConfig, globalConfig]) {
         if (existsSync(configPath)) {
@@ -105,6 +106,10 @@ export function isSourceFile(filePath) {
  */
 export function isWriteEditTool(toolName) {
     return WRITE_EDIT_TOOLS.includes(toolName);
+}
+function isDelegationToolName(toolName) {
+    const normalizedToolName = toolName.toLowerCase();
+    return normalizedToolName === 'task' || normalizedToolName === 'agent';
 }
 /**
  * Get git diff statistics for the working directory
@@ -290,8 +295,10 @@ export function processOrchestratorPreTool(input) {
     if (!isWriteEditTool(toolName)) {
         return { continue: true };
     }
-    // Extract file path from tool input
-    const filePath = (toolInput?.filePath ?? toolInput?.path ?? toolInput?.file);
+    // Extract file path from tool input.
+    // Claude Code sends file_path (snake_case) for Write/Edit tools and notebook_path for NotebookEdit.
+    // toolInput is the tool's own parameter object, NOT normalized by normalizeHookInput.
+    const filePath = (toolInput?.file_path ?? toolInput?.filePath ?? toolInput?.path ?? toolInput?.file ?? toolInput?.notebook_path);
     // Allow if path is in allowed prefix
     if (!filePath || isAllowedPath(filePath, directory)) {
         // Log allowed operation
@@ -353,8 +360,8 @@ export function processOrchestratorPostTool(input, output) {
             };
         }
     }
-    // Handle Task tool completion
-    if (toolName === 'Task' || toolName === 'task') {
+    // Handle delegation tool completion
+    if (isDelegationToolName(toolName)) {
         // Check for background task launch
         const isBackgroundLaunch = output.includes('Background task launched') || output.includes('Background task resumed');
         if (isBackgroundLaunch) {
@@ -410,7 +417,7 @@ export function checkBoulderContinuation(directory) {
 /**
  * Create omc orchestrator hook handlers
  */
-export function createSisyphusOrchestratorHook(directory) {
+export function createOmcOrchestratorHook(directory) {
     return {
         /**
          * Hook name identifier

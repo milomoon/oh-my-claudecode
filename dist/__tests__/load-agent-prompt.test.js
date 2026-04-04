@@ -9,7 +9,7 @@ describe('loadAgentPrompt', () => {
             // Should NOT contain frontmatter
             expect(prompt).not.toMatch(/^---/);
             // Should contain actual prompt content
-            expect(prompt).toMatch(/architect|Oracle|debugging/i);
+            expect(prompt).toMatch(/architect|debugging/i);
         });
         test('loads different agents correctly', () => {
             const executor = loadAgentPrompt('executor');
@@ -22,6 +22,16 @@ describe('loadAgentPrompt', () => {
             const prompt = loadAgentPrompt('qa-tester');
             expect(prompt).toBeTruthy();
             expect(prompt.length).toBeGreaterThan(100);
+        });
+        test('loads tracer with evidence-driven tracing contract', () => {
+            const prompt = loadAgentPrompt('tracer');
+            expect(prompt).toBeTruthy();
+            expect(prompt.length).toBeGreaterThan(100);
+            expect(prompt).toMatch(/observation/i);
+            expect(prompt).toMatch(/hypotheses?|hypothesis table/i);
+            expect(prompt).toMatch(/evidence for/i);
+            expect(prompt).toMatch(/evidence against|gaps/i);
+            expect(prompt).toMatch(/next probe/i);
         });
     });
     describe('security: path traversal prevention', () => {

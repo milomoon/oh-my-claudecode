@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { existsSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { initJobDb, closeJobDb, upsertJob, getJob } from '../mcp/job-state-db.js';
+import { initJobDb, closeJobDb, upsertJob, getJob } from '../lib/job-state-db.js';
 import { handleCheckJobStatus, handleListJobs, handleKillJob } from '../mcp/job-management.js';
 import type { JobStatus } from '../mcp/prompt-persistence.js';
 
@@ -35,22 +35,6 @@ vi.mock('fs', async () => {
   };
 });
 
-// Mock codex-core and gemini-core PID registries
-vi.mock('../mcp/codex-core.js', async () => {
-  const actual = await vi.importActual('../mcp/codex-core.js');
-  return {
-    ...actual,
-    isSpawnedPid: vi.fn(() => true),
-  };
-});
-
-vi.mock('../mcp/gemini-core.js', async () => {
-  const actual = await vi.importActual('../mcp/gemini-core.js');
-  return {
-    ...actual,
-    isSpawnedPid: vi.fn(() => true),
-  };
-});
 
 const TEST_DIR = join(process.cwd(), '.test-job-mgmt-sqlite-' + process.pid);
 

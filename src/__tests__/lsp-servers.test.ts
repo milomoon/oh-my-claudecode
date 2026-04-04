@@ -4,8 +4,8 @@ import { LSP_SERVERS, getServerForFile, getServerForLanguage } from '../tools/ls
 describe('LSP Server Configurations', () => {
   const serverKeys = Object.keys(LSP_SERVERS);
 
-  it('should have 16 configured servers', () => {
-    expect(serverKeys).toHaveLength(16);
+  it('should have 19 configured servers', () => {
+    expect(serverKeys).toHaveLength(19);
   });
 
   it.each(serverKeys)('server "%s" should have valid config', (key) => {
@@ -15,6 +15,11 @@ describe('LSP Server Configurations', () => {
     expect(Array.isArray(config.args)).toBe(true);
     expect(config.extensions.length).toBeGreaterThan(0);
     expect(config.installHint).toBeTruthy();
+  });
+
+  it('kotlin should use stdio and an extended initialize timeout', () => {
+    expect(LSP_SERVERS.kotlin.args).toContain('--stdio');
+    expect(LSP_SERVERS.kotlin.initializeTimeoutMs).toBeGreaterThan(15_000);
   });
 
   it('should have no duplicate extension mappings across servers', () => {
@@ -55,7 +60,12 @@ describe('getServerForFile', () => {
     ['page.heex', 'ElixirLS'],
     ['template.eex', 'ElixirLS'],
     ['Program.cs', 'OmniSharp'],
+    ['main.dart', 'Dart Analysis Server'],
     ['view.erb', 'Ruby Language Server (Solargraph)'],
+    ['counter.v', 'Verible Verilog Language Server'],
+    ['defs.vh', 'Verible Verilog Language Server'],
+    ['top.sv', 'Verible Verilog Language Server'],
+    ['pkg.svh', 'Verible Verilog Language Server'],
   ];
 
   it.each(cases)('should resolve "%s" to "%s"', (file, expectedName) => {
@@ -104,6 +114,12 @@ describe('getServerForLanguage', () => {
     ['erb', 'Ruby Language Server (Solargraph)'],
     ['c#', 'OmniSharp'],
     ['cs', 'OmniSharp'],
+    ['dart', 'Dart Analysis Server'],
+    ['flutter', 'Dart Analysis Server'],
+    ['verilog', 'Verible Verilog Language Server'],
+    ['systemverilog', 'Verible Verilog Language Server'],
+    ['sv', 'Verible Verilog Language Server'],
+    ['v', 'Verible Verilog Language Server'],
   ];
 
   it.each(cases)('should resolve language "%s" to "%s"', (lang, expectedName) => {

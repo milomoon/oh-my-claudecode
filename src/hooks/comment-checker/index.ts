@@ -57,7 +57,6 @@ function detectComments(content: string, filePath: string): CommentInfo[] {
   }
 
   const comments: CommentInfo[] = [];
-  const _lines = content.split('\n');
 
   // Reset regex state
   pattern.lastIndex = 0;
@@ -225,18 +224,6 @@ export interface CommentCheckerConfig {
  * Pending calls tracking
  */
 const pendingCalls = new Map<string, PendingCall>();
-const PENDING_CALL_TTL = 60_000;
-
-function cleanupOldPendingCalls(): void {
-  const now = Date.now();
-  for (const [callID, call] of pendingCalls) {
-    if (now - call.timestamp > PENDING_CALL_TTL) {
-      pendingCalls.delete(callID);
-    }
-  }
-}
-
-let cleanupIntervalStarted = false;
 
 /**
  * Create comment checker hook for Claude Code shell hooks
@@ -246,11 +233,6 @@ let cleanupIntervalStarted = false;
  */
 export function createCommentCheckerHook(config?: CommentCheckerConfig) {
   debugLog('createCommentCheckerHook called', { config });
-
-  if (!cleanupIntervalStarted) {
-    cleanupIntervalStarted = true;
-    setInterval(cleanupOldPendingCalls, 10_000);
-  }
 
   return {
     /**

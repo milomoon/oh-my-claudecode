@@ -12,7 +12,7 @@ import {
   statSync, existsSync, readdirSync
 } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { getClaudeConfigDir } from '../utils/paths.js';
 import { validateResolvedPath, writeFileWithMode, atomicWriteJson, ensureDirWithMode } from './fs-utils.js';
 import { sanitizeName } from './tmux-session.js';
 import type { OutboxMessage } from './types.js';
@@ -25,7 +25,7 @@ export interface OutboxCursor {
 const MAX_OUTBOX_READ_SIZE = 10 * 1024 * 1024; // 10MB cap per read
 
 function teamsDir(): string {
-  return join(homedir(), '.claude', 'teams');
+  return join(getClaudeConfigDir(), 'teams');
 }
 
 /**
@@ -72,7 +72,22 @@ export function readNewOutboxMessages(
     closeSync(fd);
   }
 
-  const lines = buf.toString('utf-8').split('\n').filter(l => l.trim());
+  const chunk = buf.toString('utf-8');
+
+  // Only parse complete lines (up to the last newline) so that a partial
+  // trailing line is not delivered prematurely and then re-delivered on
+  // the next read when the cursor backtracks.
+  let consumed = bytesToRead;
+  let completePortion = chunk;
+  if (!chunk.endsWith('\n')) {
+    const lastNewline = chunk.lastIndexOf('\n');
+    consumed = lastNewline >= 0
+      ? Buffer.byteLength(chunk.slice(0, lastNewline + 1), 'utf-8')
+      : 0;
+    completePortion = lastNewline >= 0 ? chunk.slice(0, lastNewline + 1) : '';
+  }
+
+  const lines = completePortion.split('\n').filter(l => l.trim());
   const messages: OutboxMessage[] = [];
   for (const line of lines) {
     try {
@@ -81,7 +96,7 @@ export function readNewOutboxMessages(
   }
 
   // Update cursor atomically to prevent corruption on crash
-  const newCursor: OutboxCursor = { bytesRead: cursor.bytesRead + bytesToRead };
+  const newCursor: OutboxCursor = { bytesRead: cursor.bytesRead + consumed };
   const cursorDir = join(teamsDir(), safeName, 'outbox');
   ensureDirWithMode(cursorDir);
   atomicWriteJson(cursorPath, newCursor);

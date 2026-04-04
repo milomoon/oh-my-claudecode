@@ -13,9 +13,30 @@
 import { readJobStatus, readCompletedResponse, listActiveJobs, writeJobStatus, getPromptsDir, getJobWorkingDir, } from './prompt-persistence.js';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { isSpawnedPid as isCodexSpawnedPid } from './codex-core.js';
-import { isSpawnedPid as isGeminiSpawnedPid } from './gemini-core.js';
-import { isJobDbInitialized, getJob, getActiveJobs as getActiveJobsFromDb, getJobsByStatus, updateJobStatus } from './job-state-db.js';
+import { isJobDbInitialized, getJob, getActiveJobs as getActiveJobsFromDb, getJobsByStatus, updateJobStatus } from '../lib/job-state-db.js';
+/**
+ * Set of PIDs spawned by this process. Used to verify ownership before
+ * sending signals. Falls back to accepting any PID recorded in a status file
+ * when the set is empty (e.g. after a server restart).
+ */
+const spawnedPids = new Set();
+/**
+ * Register a PID as spawned by this process.
+ */
+export function registerSpawnedPid(pid) {
+    spawnedPids.add(pid);
+}
+/**
+ * PID ownership check. Returns true if the PID was spawned by this process
+ * or if no PIDs have been registered yet (status file is the ownership proof).
+ */
+function isKnownPid(pid) {
+    if (spawnedPids.size === 0) {
+        // No PIDs registered (e.g. server restarted) — accept based on status file
+        return true;
+    }
+    return spawnedPids.has(pid);
+}
 /** Signals allowed for kill_job. SIGKILL excluded - too dangerous for process groups. */
 const ALLOWED_SIGNALS = new Set(['SIGTERM', 'SIGINT']);
 // ---------------------------------------------------------------------------
@@ -158,10 +179,15 @@ export async function handleWaitForJob(provider, jobId, timeoutMs = 3600000) {
         const jobDir = getJobWorkingDir(provider, jobId);
         const found = findJobStatusFile(provider, jobId, jobDir);
         if (!found) {
-            // Job may not be written yet (async SQLite init race) — retry with backoff
-            notFoundCount++;
-            if (notFoundCount >= 10) {
-                return textResult(`No job found with ID: ${jobId}`, true);
+            // When SQLite is initialized but the job isn't in the DB yet, this
+            // is likely a creation race — keep polling until the deadline rather
+            // than giving up early. When SQLite is NOT initialized, the JSON
+            // file path is the only source, so 10 retries is a reasonable limit.
+            if (!isJobDbInitialized()) {
+                notFoundCount++;
+                if (notFoundCount >= 10) {
+                    return textResult(`No job found with ID: ${jobId}`, true);
+                }
             }
             await new Promise(resolve => setTimeout(resolve, pollDelay));
             pollDelay = Math.min(pollDelay * 1.5, 2000);
@@ -284,8 +310,7 @@ export async function handleKillJob(provider, jobId, signal = 'SIGTERM') {
                 if (!dbJob.pid || !Number.isInteger(dbJob.pid) || dbJob.pid <= 0 || dbJob.pid > 4194304) {
                     return textResult(`Job ${jobId} has no valid PID recorded. Cannot send signal.`, true);
                 }
-                const isOurPid = provider === 'codex' ? isCodexSpawnedPid(dbJob.pid) : isGeminiSpawnedPid(dbJob.pid);
-                if (!isOurPid) {
+                if (!isKnownPid(dbJob.pid)) {
                     return textResult(`Job ${jobId} PID ${dbJob.pid} was not spawned by this process. Refusing to send signal for safety.`, true);
                 }
                 // Send signal first, THEN update status based on outcome
@@ -337,11 +362,8 @@ export async function handleKillJob(provider, jobId, signal = 'SIGTERM') {
     if (!Number.isInteger(status.pid) || status.pid <= 0 || status.pid > 4194304) {
         return textResult(`Job ${jobId} has invalid PID: ${status.pid}. Refusing to send signal.`, true);
     }
-    // Verify this PID was spawned by us
-    const isOurPid = provider === 'codex'
-        ? isCodexSpawnedPid(status.pid)
-        : isGeminiSpawnedPid(status.pid);
-    if (!isOurPid) {
+    // Verify this PID is acceptable (status file is the ownership proof)
+    if (!isKnownPid(status.pid)) {
         return textResult(`Job ${jobId} PID ${status.pid} was not spawned by this process. Refusing to send signal for safety.`, true);
     }
     // Mark killedByUser before sending signal so the close handler can see it

@@ -24,22 +24,6 @@ vi.mock('fs', async () => {
         readFileSync: vi.fn(),
     };
 });
-// Mock codex-core PID registry
-vi.mock('../mcp/codex-core.js', async () => {
-    const actual = await vi.importActual('../mcp/codex-core.js');
-    return {
-        ...actual,
-        isSpawnedPid: vi.fn(() => true),
-    };
-});
-// Mock gemini-core PID registry
-vi.mock('../mcp/gemini-core.js', async () => {
-    const actual = await vi.importActual('../mcp/gemini-core.js');
-    return {
-        ...actual,
-        isSpawnedPid: vi.fn(() => true),
-    };
-});
 describe('job-management', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -182,7 +166,7 @@ describe('job-management', () => {
                 vi.spyOn(process, 'kill').mockImplementation(() => { throw esrchError; });
                 const result = await handleKillJob('codex', 'ab12cd34', 'SIGTERM');
                 // Should NOT overwrite to failed since job is completed
-                const failedWrites = writeJobStatusSpy.mock.calls.filter(call => call[0].status === 'failed');
+                const _failedWrites = writeJobStatusSpy.mock.calls.filter(call => call[0].status === 'failed');
                 // The initial killedByUser write happens, but after ESRCH with completed status, no failed write
                 expect(result.content[0].text).toContain('completed successfully');
             });

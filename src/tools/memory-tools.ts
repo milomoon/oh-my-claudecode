@@ -6,7 +6,6 @@
 
 import { z } from 'zod';
 import {
-  getWorktreeRoot,
   getWorktreeProjectMemoryPath,
   ensureOmcDir,
   validateWorkingDirectory,
@@ -16,11 +15,10 @@ import {
   saveProjectMemory,
   addCustomNote,
   addDirective,
-  formatDirectivesForContext,
   type ProjectMemory,
-  type CustomNote,
   type UserDirective,
 } from '../hooks/project-memory/index.js';
+import { mergeProjectMemory } from '../lib/project-memory-merge.js';
 import { ToolDefinition } from './types.js';
 
 // ============================================================================
@@ -125,7 +123,7 @@ export const projectMemoryWriteTool: ToolDefinition<{
       if (merge) {
         const existing = await loadProjectMemory(root);
         if (existing) {
-          finalMemory = { ...existing, ...memory } as unknown as ProjectMemory;
+          finalMemory = mergeProjectMemory(existing, memory as Partial<ProjectMemory>);
         } else {
           finalMemory = memory as unknown as ProjectMemory;
         }
@@ -180,7 +178,7 @@ export const projectMemoryAddNoteTool: ToolDefinition<{
       const root = validateWorkingDirectory(workingDirectory);
 
       // Ensure memory exists
-      let memory = await loadProjectMemory(root);
+      const memory = await loadProjectMemory(root);
       if (!memory) {
         return {
           content: [{
@@ -234,7 +232,7 @@ export const projectMemoryAddDirectiveTool: ToolDefinition<{
       const root = validateWorkingDirectory(workingDirectory);
 
       // Ensure memory exists
-      let memory = await loadProjectMemory(root);
+      const memory = await loadProjectMemory(root);
       if (!memory) {
         return {
           content: [{

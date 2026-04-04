@@ -10,11 +10,9 @@ export const MODES = {
   AUTOPILOT: 'autopilot',
   RALPH: 'ralph',
   ULTRAWORK: 'ultrawork',
-  ULTRAPILOT: 'ultrapilot',
   ULTRAQA: 'ultraqa',
-  ECOMODE: 'ecomode',
   TEAM: 'team',
-  PIPELINE: 'pipeline',
+  RALPLAN: 'ralplan',
 } as const;
 export type ModeName = typeof MODES[keyof typeof MODES];
 
@@ -28,8 +26,11 @@ export const TOOL_CATEGORIES = {
   MEMORY: 'memory',
   TRACE: 'trace',
   SKILLS: 'skills',
+  INTEROP: 'interop',
   CODEX: 'codex',
   GEMINI: 'gemini',
+  SHARED_MEMORY: 'shared-memory',
+  DEEPINIT: 'deepinit',
 } as const;
 export type ToolCategory = typeof TOOL_CATEGORIES[keyof typeof TOOL_CATEGORIES];
 

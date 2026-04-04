@@ -2,7 +2,7 @@
  * Verification Tier Selector
  *
  * Scales verification effort with task complexity to optimize cost
- * while maintaining quality. Used by ralph, autopilot, and ultrapilot.
+ * while maintaining quality. Used by ralph and autopilot.
  */
 
 export interface ChangeMetadata {
@@ -81,7 +81,7 @@ export function detectArchitecturalChanges(files: string[]): boolean {
     /config\.(ts|js|json)$/i,
     /schema\.(ts|prisma|sql)$/i,
     /definitions\.ts$/i,
-    /types\.ts$/i,
+    /(?:^|\/)types\.ts$/i,
     /package\.json$/i,
     /tsconfig\.json$/i,
   ];

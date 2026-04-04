@@ -6,10 +6,13 @@
  */
 
 import chalk from 'chalk';
-import { execSync, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs';
+import { execSync, execFileSync } from 'child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from 'fs';
 import { homedir } from 'os';
 import { join, basename, isAbsolute, relative } from 'path';
+import { loadConfig } from '../../config/loader.js';
+import { parseRemoteUrl, getProvider } from '../../providers/index.js';
+import type { ProviderName, GitProvider } from '../../providers/types.js';
 
 export interface TeleportOptions {
   worktree?: boolean;
@@ -28,6 +31,121 @@ export interface TeleportResult {
 
 // Default worktree root directory
 const DEFAULT_WORKTREE_ROOT = join(homedir(), 'Workspace', 'omc-worktrees');
+const PACKAGE_JSON_NAME = 'package.json';
+const PACKAGE_MANAGER_LOCKFILES = {
+  pnpm: 'pnpm-lock.yaml',
+  yarn: 'yarn.lock',
+  npm: 'package-lock.json',
+} as const;
+
+type SupportedPackageManager = keyof typeof PACKAGE_MANAGER_LOCKFILES;
+
+function readPackageJsonText(directory: string): string | null {
+  try {
+    return readFileSync(join(directory, PACKAGE_JSON_NAME), 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function detectPackageManager(parentRepoRoot: string, worktreePath: string): SupportedPackageManager {
+  for (const [manager, lockfile] of Object.entries(PACKAGE_MANAGER_LOCKFILES) as [SupportedPackageManager, string][]) {
+    if (existsSync(join(worktreePath, lockfile)) || existsSync(join(parentRepoRoot, lockfile))) {
+      return manager;
+    }
+  }
+
+  for (const directory of [worktreePath, parentRepoRoot]) {
+    const packageJsonText = readPackageJsonText(directory);
+    if (!packageJsonText) continue;
+    try {
+      const parsed = JSON.parse(packageJsonText) as { packageManager?: string };
+      const packageManager = parsed.packageManager?.split('@')[0];
+      if (packageManager === 'pnpm' || packageManager === 'yarn' || packageManager === 'npm') {
+        return packageManager;
+      }
+    } catch {
+      // Ignore and fall back to npm.
+    }
+  }
+
+  return 'npm';
+}
+
+function symlinkNodeModules(parentRepoRoot: string, worktreePath: string): boolean {
+  const sourceNodeModules = join(parentRepoRoot, 'node_modules');
+  const targetNodeModules = join(worktreePath, 'node_modules');
+
+  if (!existsSync(sourceNodeModules) || existsSync(targetNodeModules)) {
+    return false;
+  }
+
+  symlinkSync(sourceNodeModules, targetNodeModules, process.platform === 'win32' ? 'junction' : 'dir');
+  return true;
+}
+
+function installDependencies(worktreePath: string, packageManager: SupportedPackageManager): void {
+  const argsByManager: Record<SupportedPackageManager, string[]> = {
+    npm: ['install'],
+    pnpm: ['install'],
+    yarn: ['install'],
+  };
+
+  execFileSync(packageManager, argsByManager[packageManager], {
+    cwd: worktreePath,
+    stdio: 'inherit',
+  });
+}
+
+function warnTeleportDependencyFallback(message: string, json: boolean | undefined): void {
+  if (json) return;
+  console.warn(chalk.yellow(message));
+}
+
+function bootstrapTeleportDependencies(
+  parentRepoRoot: string,
+  worktreePath: string,
+  options: { json?: boolean; symlinkNodeModules: boolean }
+): { mode: 'symlink' | 'install'; packageManager: SupportedPackageManager } {
+  const packageManager = detectPackageManager(parentRepoRoot, worktreePath);
+
+  if (!options.symlinkNodeModules) {
+    installDependencies(worktreePath, packageManager);
+    return { mode: 'install', packageManager };
+  }
+
+  const parentPackageJson = readPackageJsonText(parentRepoRoot);
+  const worktreePackageJson = readPackageJsonText(worktreePath);
+
+  if (!parentPackageJson || !worktreePackageJson) {
+    warnTeleportDependencyFallback(
+      'Warning: could not read package.json for teleport dependency reuse; running full install instead.',
+      options.json,
+    );
+    installDependencies(worktreePath, packageManager);
+    return { mode: 'install', packageManager };
+  }
+
+  if (parentPackageJson !== worktreePackageJson) {
+    warnTeleportDependencyFallback(
+      'Warning: worktree package.json differs from parent repo; running full install instead of symlinking node_modules.',
+      options.json,
+    );
+    installDependencies(worktreePath, packageManager);
+    return { mode: 'install', packageManager };
+  }
+
+  if (symlinkNodeModules(parentRepoRoot, worktreePath)) {
+    return { mode: 'symlink', packageManager };
+  }
+
+  warnTeleportDependencyFallback(
+    'Warning: parent node_modules is unavailable for teleport symlink reuse; running full install instead.',
+    options.json,
+  );
+  installDependencies(worktreePath, packageManager);
+  return { mode: 'install', packageManager };
+}
 
 /**
  * Parse a reference string into components
@@ -39,34 +157,129 @@ function parseRef(ref: string): {
   repo?: string;
   number?: number;
   name?: string;
+  provider?: ProviderName;
 } {
-  // GitHub PR URL
-  const prUrlMatch = ref.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  if (prUrlMatch) {
+  // GitHub PR URL: github.com/owner/repo/pull/N
+  const ghPrUrlMatch = ref.match(/^https?:\/\/[^/]*github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[?#].*)?$/);
+  if (ghPrUrlMatch) {
     return {
       type: 'pr',
-      owner: prUrlMatch[1],
-      repo: prUrlMatch[2],
-      number: parseInt(prUrlMatch[3], 10),
+      owner: ghPrUrlMatch[1],
+      repo: ghPrUrlMatch[2],
+      number: parseInt(ghPrUrlMatch[3], 10),
+      provider: 'github',
     };
   }
 
-  // GitHub Issue URL
-  const issueUrlMatch = ref.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
-  if (issueUrlMatch) {
+  // GitHub Issue URL: github.com/owner/repo/issues/N
+  const ghIssueUrlMatch = ref.match(/^https?:\/\/[^/]*github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[?#].*)?$/);
+  if (ghIssueUrlMatch) {
     return {
       type: 'issue',
-      owner: issueUrlMatch[1],
-      repo: issueUrlMatch[2],
-      number: parseInt(issueUrlMatch[3], 10),
+      owner: ghIssueUrlMatch[1],
+      repo: ghIssueUrlMatch[2],
+      number: parseInt(ghIssueUrlMatch[3], 10),
+      provider: 'github',
     };
   }
 
-  // owner/repo#123 format
-  const fullRefMatch = ref.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  // GitLab MR URL: gitlab.*/namespace/-/merge_requests/N (supports nested groups and self-hosted)
+  const glMrUrlMatch = ref.match(/^https?:\/\/[^/]*gitlab[^/]*\/(.+)\/-\/merge_requests\/(\d+)(?:[?#].*)?$/);
+  if (glMrUrlMatch) {
+    const namespaceParts = glMrUrlMatch[1].split('/');
+    const repo = namespaceParts.pop()!;
+    const owner = namespaceParts.join('/');
+    return {
+      type: 'pr',
+      owner,
+      repo,
+      number: parseInt(glMrUrlMatch[2], 10),
+      provider: 'gitlab',
+    };
+  }
+
+  // GitLab Issue URL: gitlab.*/namespace/-/issues/N (supports nested groups and self-hosted)
+  const glIssueUrlMatch = ref.match(/^https?:\/\/[^/]*gitlab[^/]*\/(.+)\/-\/issues\/(\d+)(?:[?#].*)?$/);
+  if (glIssueUrlMatch) {
+    const namespaceParts = glIssueUrlMatch[1].split('/');
+    const repo = namespaceParts.pop()!;
+    const owner = namespaceParts.join('/');
+    return {
+      type: 'issue',
+      owner,
+      repo,
+      number: parseInt(glIssueUrlMatch[2], 10),
+      provider: 'gitlab',
+    };
+  }
+
+  // Bitbucket PR URL: bitbucket.org/workspace/repo/pull-requests/N
+  const bbPrUrlMatch = ref.match(/^https?:\/\/[^/]*bitbucket\.org\/([^/]+)\/([^/]+)\/pull-requests\/(\d+)(?:[?#].*)?$/);
+  if (bbPrUrlMatch) {
+    return {
+      type: 'pr',
+      owner: bbPrUrlMatch[1],
+      repo: bbPrUrlMatch[2],
+      number: parseInt(bbPrUrlMatch[3], 10),
+      provider: 'bitbucket',
+    };
+  }
+
+  // Bitbucket Issue URL: bitbucket.org/workspace/repo/issues/N
+  const bbIssueUrlMatch = ref.match(/^https?:\/\/[^/]*bitbucket\.org\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:[?#].*)?$/);
+  if (bbIssueUrlMatch) {
+    return {
+      type: 'issue',
+      owner: bbIssueUrlMatch[1],
+      repo: bbIssueUrlMatch[2],
+      number: parseInt(bbIssueUrlMatch[3], 10),
+      provider: 'bitbucket',
+    };
+  }
+
+  // Azure DevOps PR URL: dev.azure.com/org/project/_git/repo/pullrequest/N
+  const azPrUrlMatch = ref.match(/^https?:\/\/[^/]*dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d+)(?:[?#].*)?$/);
+  if (azPrUrlMatch) {
+    return {
+      type: 'pr',
+      owner: `${azPrUrlMatch[1]}/${azPrUrlMatch[2]}`,
+      repo: azPrUrlMatch[3],
+      number: parseInt(azPrUrlMatch[4], 10),
+      provider: 'azure-devops',
+    };
+  }
+
+  // Azure DevOps legacy: https://{org}.visualstudio.com/{project}/_git/{repo}/pullrequest/{id}
+  const azureLegacyPrMatch = ref.match(
+    /^https?:\/\/([^.]+)\.visualstudio\.com\/([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d+)/i
+  );
+  if (azureLegacyPrMatch) {
+    return {
+      type: 'pr',
+      provider: 'azure-devops',
+      owner: `${azureLegacyPrMatch[1]}/${azureLegacyPrMatch[2]}`,
+      repo: azureLegacyPrMatch[3],
+      number: parseInt(azureLegacyPrMatch[4], 10),
+    };
+  }
+
+  // owner/repo!123 format (GitLab MR shorthand, supports nested groups)
+  const gitlabShorthand = ref.match(/^(.+?)\/([^!/]+)!(\d+)$/);
+  if (gitlabShorthand) {
+    return {
+      type: 'pr',
+      owner: gitlabShorthand[1],
+      repo: gitlabShorthand[2],
+      number: parseInt(gitlabShorthand[3], 10),
+      provider: 'gitlab',
+    };
+  }
+
+  // owner/repo#123 format (provider-agnostic, supports nested groups)
+  const fullRefMatch = ref.match(/^(.+)\/([^/#]+)#(\d+)$/);
   if (fullRefMatch) {
     return {
-      type: 'issue', // Will be refined by gh CLI
+      type: 'issue', // Will be refined by provider CLI
       owner: fullRefMatch[1],
       repo: fullRefMatch[2],
       number: parseInt(fullRefMatch[3], 10),
@@ -113,22 +326,13 @@ function sanitize(str: string, maxLen: number = 30): string {
 /**
  * Get current git repo info
  */
-function getCurrentRepo(): { owner: string; repo: string; root: string } | null {
+function getCurrentRepo(): { owner: string; repo: string; root: string; provider: ProviderName } | null {
   try {
-    const root = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim();
-    const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8' }).trim();
-
-    // Parse remote URL (SSH or HTTPS)
-    const sshMatch = remoteUrl.match(/git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
-    const httpsMatch = remoteUrl.match(/github\.com\/([^/]+)\/(.+?)(?:\.git)?$/);
-
-    const match = sshMatch || httpsMatch;
-    if (match) {
-      return {
-        owner: match[1],
-        repo: match[2].replace(/\.git$/, ''),
-        root,
-      };
+    const root = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', timeout: 5000 }).trim();
+    const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', timeout: 5000 }).trim();
+    const parsed = parseRemoteUrl(remoteUrl);
+    if (parsed) {
+      return { owner: parsed.owner, repo: parsed.repo, root, provider: parsed.provider };
     }
   } catch {
     // Not in a git repo or no origin
@@ -137,29 +341,21 @@ function getCurrentRepo(): { owner: string; repo: string; root: string } | null 
 }
 
 /**
- * Fetch issue/PR info from GitHub
+ * Fetch issue/PR info via provider abstraction
  */
-function fetchGitHubInfo(
+async function fetchProviderInfo(
   type: 'issue' | 'pr',
   number: number,
+  provider: GitProvider,
   owner?: string,
   repo?: string
-): { title: string; branch?: string } | null {
-  try {
-    const repoArg = owner && repo ? `--repo ${owner}/${repo}` : '';
-    const cmd = type === 'pr'
-      ? `gh pr view ${number} ${repoArg} --json title,headRefName`
-      : `gh issue view ${number} ${repoArg} --json title`;
-
-    const result = execSync(cmd, { encoding: 'utf-8' });
-    const data = JSON.parse(result);
-    return {
-      title: data.title,
-      branch: data.headRefName,
-    };
-  } catch {
-    return null;
+): Promise<{ title: string; branch?: string } | null> {
+  if (type === 'pr') {
+    const pr = await provider.viewPR(number, owner, repo);
+    return pr ? { title: pr.title, branch: pr.headBranch } : null;
   }
+  const issue = await provider.viewIssue(number, owner, repo);
+  return issue ? { title: issue.title } : null;
 }
 
 /**
@@ -184,14 +380,14 @@ function createWorktree(
     }
 
     // Fetch latest from origin
-    execSync(`git fetch origin ${baseBranch}`, {
+    execFileSync('git', ['fetch', 'origin', baseBranch], {
       cwd: repoRoot,
       stdio: 'pipe',
     });
 
     // Create branch from base if it doesn't exist
     try {
-      execSync(`git branch ${branchName} origin/${baseBranch}`, {
+      execFileSync('git', ['branch', branchName, `origin/${baseBranch}`], {
         cwd: repoRoot,
         stdio: 'pipe',
       });
@@ -200,7 +396,7 @@ function createWorktree(
     }
 
     // Create the worktree
-    execSync(`git worktree add "${worktreePath}" ${branchName}`, {
+    execFileSync('git', ['worktree', 'add', worktreePath, branchName], {
       cwd: repoRoot,
       stdio: 'pipe',
     });
@@ -235,6 +431,11 @@ export async function teleportCommand(
 
   const { owner, repo, root: repoRoot } = currentRepo;
   const repoName = basename(repoRoot);
+  const config = loadConfig();
+  const shouldSymlinkNodeModules = config.teleport?.symlinkNodeModules ?? true;
+  // Use provider from parsed ref if available, otherwise fall back to current repo
+  const effectiveProviderName = parsed.provider || currentRepo.provider;
+  const provider = getProvider(effectiveProviderName);
 
   let branchName: string;
   let worktreeDirName: string;
@@ -263,17 +464,26 @@ export async function teleportCommand(
       return { success: false, error };
     }
 
+    if (!provider) {
+      const error = `Could not fetch info for #${parsed.number}. Could not detect git provider.`;
+      if (!options.json) {
+        console.error(chalk.red(error));
+      }
+      return { success: false, error };
+    }
+
     // Try to detect if it's a PR or issue
-    const prInfo = fetchGitHubInfo('pr', parsed.number, resolvedOwner, resolvedRepo);
+    const prInfo = await fetchProviderInfo('pr', parsed.number, provider, resolvedOwner, resolvedRepo);
     const issueInfo = !prInfo
-      ? fetchGitHubInfo('issue', parsed.number, resolvedOwner, resolvedRepo)
+      ? await fetchProviderInfo('issue', parsed.number, provider, resolvedOwner, resolvedRepo)
       : null;
 
     const info = prInfo || issueInfo;
     const isPR = !!prInfo;
 
     if (!info) {
-      const error = `Could not fetch info for #${parsed.number}. Make sure gh CLI is installed and authenticated.`;
+      const cli = provider.getRequiredCLI();
+      const error = `Could not fetch info for #${parsed.number} from ${provider.displayName}. ${cli ? `Make sure ${cli} CLI is installed and authenticated.` : 'Check your authentication credentials and network connection.'}`;
       if (!options.json) {
         console.error(chalk.red(error));
       }
@@ -292,14 +502,30 @@ export async function teleportCommand(
         console.log(chalk.blue(`Creating PR review worktree: #${parsed.number} - ${title}`));
       }
 
-      // Fetch the PR branch
-      try {
-        execSync(
-          `git fetch origin pull/${parsed.number}/head:${branchName}`,
-          { cwd: repoRoot, stdio: 'pipe' }
-        );
-      } catch {
-        // Branch might already exist
+      // Fetch the PR branch using provider-specific refspec or head branch
+      if (provider.prRefspec) {
+        try {
+          const refspec = provider.prRefspec
+            .replace('{number}', String(parsed.number))
+            .replace('{branch}', branchName);
+          execFileSync(
+            'git', ['fetch', 'origin', refspec],
+            { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 }
+          );
+        } catch {
+          // Branch might already exist
+        }
+      } else if (info.branch) {
+        // For providers without prRefspec (Bitbucket, Azure, Gitea),
+        // fetch the PR's head branch from origin
+        try {
+          execFileSync(
+            'git', ['fetch', 'origin', `${info.branch}:${branchName}`],
+            { cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 }
+          );
+        } catch {
+          // Branch might already exist locally
+        }
       }
     } else {
       // For issues, create a fix branch
@@ -328,6 +554,19 @@ export async function teleportCommand(
       console.error(chalk.red(`Failed to create worktree: ${result.error}`));
     }
     return { success: false, error: result.error };
+  }
+
+  try {
+    bootstrapTeleportDependencies(repoRoot, worktreePath, {
+      json: options.json,
+      symlinkNodeModules: shouldSymlinkNodeModules,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!options.json) {
+      console.error(chalk.red(`Failed to bootstrap worktree dependencies: ${message}`));
+    }
+    return { success: false, error: message };
   }
 
   if (!options.json) {
@@ -442,11 +681,12 @@ export async function teleportListCommand(options: { json?: boolean }): Promise<
 
 /**
  * Remove a worktree
+ * Returns 0 on success, 1 on failure.
  */
 export async function teleportRemoveCommand(
   pathOrName: string,
   options: { force?: boolean; json?: boolean }
-): Promise<void> {
+): Promise<number> {
   const worktreeRoot = DEFAULT_WORKTREE_ROOT;
 
   // Resolve path - could be relative name or full path
@@ -462,7 +702,7 @@ export async function teleportRemoveCommand(
     } else {
       console.error(chalk.red(error));
     }
-    return;
+    return 1;
   }
 
   // Safety check: must be under worktree root
@@ -474,7 +714,7 @@ export async function teleportRemoveCommand(
     } else {
       console.error(chalk.red(error));
     }
-    return;
+    return 1;
   }
 
   try {
@@ -492,7 +732,7 @@ export async function teleportRemoveCommand(
         } else {
           console.error(chalk.red(error));
         }
-        return;
+        return 1;
       }
     }
 
@@ -508,8 +748,10 @@ export async function teleportRemoveCommand(
     const mainRepo = mainRepoMatch ? mainRepoMatch[1] : null;
 
     if (mainRepo) {
-      const forceFlag = options.force ? '--force' : '';
-      execSync(`git worktree remove "${worktreePath}" ${forceFlag}`, {
+      const args = options.force
+        ? ['worktree', 'remove', '--force', worktreePath]
+        : ['worktree', 'remove', worktreePath];
+      execFileSync('git', args, {
         cwd: mainRepo,
         stdio: 'pipe',
       });
@@ -523,6 +765,7 @@ export async function teleportRemoveCommand(
     } else {
       console.log(chalk.green(`Removed worktree: ${worktreePath}`));
     }
+    return 0;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (options.json) {
@@ -530,5 +773,6 @@ export async function teleportRemoveCommand(
     } else {
       console.error(chalk.red(`Failed to remove worktree: ${message}`));
     }
+    return 1;
   }
 }

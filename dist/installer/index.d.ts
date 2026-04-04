@@ -41,23 +41,39 @@ export interface InstallResult {
 /** Installation options */
 export interface InstallOptions {
     force?: boolean;
+    version?: string;
     verbose?: boolean;
     skipClaudeCheck?: boolean;
     forceHooks?: boolean;
     refreshHooksInPlugin?: boolean;
+    skipHud?: boolean;
 }
+/**
+ * Read hudEnabled from .omc-config.json without importing auto-update
+ * (avoids circular dependency since auto-update imports from installer)
+ */
+export declare function isHudEnabledInConfig(): boolean;
+/**
+ * Detect whether a statusLine config belongs to oh-my-claudecode.
+ *
+ * Checks the command string for known OMC HUD paths so that custom
+ * (non-OMC) statusLine configurations are preserved during forced
+ * updates/reconciliation.
+ *
+ * @param statusLine - The statusLine setting object from settings.json
+ * @returns true if the statusLine was set by OMC
+ */
+export declare function isOmcStatusLine(statusLine: unknown): boolean;
 /**
  * Detect whether a hook command belongs to oh-my-claudecode.
  *
- * Uses substring matching rather than word-boundary regex.
- * Rationale: Real OMC hooks use compound names where "omc" is embedded
- * (e.g., `omc-pre-tool-use.mjs`, `oh-my-claudecode-hook.mjs`). A word-boundary
- * regex like /\bomc\b/ would fail to match "oh-my-claudecode" since "omc" appears
- * as an interior substring. The theoretical false positives (words containing "omc"
- * like "atomic", "socom") are extremely unlikely in real hook command paths.
+ * Recognition strategy (any match is sufficient):
+ * 1. Command path contains "omc" as a path/word segment (e.g. `omc-hook.mjs`, `/omc/`)
+ * 2. Command path contains "oh-my-claudecode"
+ * 3. Command references a known OMC hook filename inside .claude/hooks/
  *
  * @param command - The hook command string
- * @returns true if the command contains 'omc' or 'oh-my-claudecode'
+ * @returns true if the command belongs to OMC
  */
 export declare function isOmcHook(command: string): boolean;
 /**
@@ -98,6 +114,33 @@ export declare function isRunningAsPlugin(): boolean;
  * @returns true if running as a project-scoped plugin, false otherwise
  */
 export declare function isProjectScopedPlugin(): boolean;
+export declare function getInstalledOmcPluginRoots(): string[];
+/**
+ * Detect whether an installed Claude Code plugin already provides OMC agent
+ * markdown files, so the legacy ~/.claude/agents copy can be skipped.
+ */
+export declare function hasPluginProvidedAgentFiles(): boolean;
+export declare function getRuntimePackageRoot(): string;
+/**
+ * Extract the embedded OMC version from a CLAUDE.md file.
+ *
+ * Primary source of truth is the injected `<!-- OMC:VERSION:x.y.z -->` marker.
+ * Falls back to legacy headings that may include a version string inline.
+ */
+export declare function extractOmcVersionFromClaudeMd(content: string): string | null;
+/**
+ * Keep persisted setup metadata in sync with the installed OMC runtime version.
+ *
+ * This intentionally updates only already-configured users by default so
+ * installer/reconciliation flows do not accidentally mark fresh installs as if
+ * the interactive setup wizard had been completed.
+ */
+export declare function syncPersistedSetupVersion(options?: {
+    configPath?: string;
+    claudeMdPath?: string;
+    version?: string;
+    onlyIfConfigured?: boolean;
+}): boolean;
 /**
  * Merge OMC content into existing CLAUDE.md using markers
  * @param existingContent - Existing CLAUDE.md content (null if file doesn't exist)

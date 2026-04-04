@@ -18,4 +18,9 @@ export { renderAutopilot, renderAutopilotCompact, type AutopilotStateForHud } fr
 export { renderCwd } from './cwd.js';
 export { renderGitRepo, renderGitBranch, getGitRepoName, getGitBranch } from './git.js';
 export { renderModel, formatModelName } from './model.js';
+export { renderPromptTime } from './prompt-time.js';
+export { detectApiKeySource, renderApiKeySource, type ApiKeySource } from './api-key-source.js';
+export { renderMissionBoard } from './mission-board.js';
+export { renderSessionSummary, type SessionSummaryState } from './session-summary.js';
+export { renderLastTool } from './last-tool.js';
 //# sourceMappingURL=index.d.ts.map

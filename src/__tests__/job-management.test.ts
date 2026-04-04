@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { findJobStatusFile, handleKillJob, handleWaitForJob, handleCheckJobStatus, handleListJobs } from '../mcp/job-management.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { findJobStatusFile, handleKillJob, handleWaitForJob, handleCheckJobStatus } from '../mcp/job-management.js';
 import * as promptPersistence from '../mcp/prompt-persistence.js';
 
 // Mock the prompt-persistence module
@@ -27,23 +27,6 @@ vi.mock('fs', async () => {
   };
 });
 
-// Mock codex-core PID registry
-vi.mock('../mcp/codex-core.js', async () => {
-  const actual = await vi.importActual('../mcp/codex-core.js');
-  return {
-    ...actual,
-    isSpawnedPid: vi.fn(() => true),
-  };
-});
-
-// Mock gemini-core PID registry
-vi.mock('../mcp/gemini-core.js', async () => {
-  const actual = await vi.importActual('../mcp/gemini-core.js');
-  return {
-    ...actual,
-    isSpawnedPid: vi.fn(() => true),
-  };
-});
 
 describe('job-management', () => {
   beforeEach(() => {
@@ -214,7 +197,7 @@ describe('job-management', () => {
         const result = await handleKillJob('codex', 'ab12cd34', 'SIGTERM');
 
         // Should NOT overwrite to failed since job is completed
-        const failedWrites = writeJobStatusSpy.mock.calls.filter(
+        const _failedWrites = writeJobStatusSpy.mock.calls.filter(
           call => (call[0] as any).status === 'failed'
         );
         // The initial killedByUser write happens, but after ESRCH with completed status, no failed write

@@ -22,26 +22,65 @@ describe('HUD Default Configuration', () => {
     it('should use text format for thinking indicator by default', () => {
       expect(DEFAULT_HUD_CONFIG.elements.thinkingFormat).toBe('text');
     });
+
+    it('should keep mission board disabled by default', () => {
+      expect(DEFAULT_HUD_CONFIG.elements.missionBoard).toBe(false);
+      expect(DEFAULT_HUD_CONFIG.missionBoard?.enabled).toBe(false);
+    });
+
+    it('should default wrapMode to truncate', () => {
+      expect(DEFAULT_HUD_CONFIG.wrapMode).toBe('truncate');
+    });
+
+    it('should default session duration display to enabled', () => {
+      expect(DEFAULT_HUD_CONFIG.elements.showSessionDuration).toBe(true);
+    });
+
+    it('should keep token usage display optional by default', () => {
+      expect(DEFAULT_HUD_CONFIG.elements.showTokens).toBe(false);
+    });
   });
 
   describe('PRESET_CONFIGS', () => {
-    const presets = ['minimal', 'analytics', 'focused', 'full', 'opencode', 'dense'] as const;
+    const presets = ['minimal', 'focused', 'full', 'opencode', 'dense'] as const;
 
-    presets.forEach(preset => {
-      it(`${preset} preset should use text thinkingFormat`, () => {
+    it('should use text thinkingFormat in all presets', () => {
+      presets.forEach(preset => {
         expect(PRESET_CONFIGS[preset].thinkingFormat).toBe('text');
       });
+    });
 
-      it(`${preset} preset should have gitRepo disabled`, () => {
-        expect(PRESET_CONFIGS[preset].gitRepo).toBe(false);
-      });
+    it('should have gitRepo enabled in full and dense presets', () => {
+      expect(PRESET_CONFIGS.full.gitRepo).toBe(true);
+      expect(PRESET_CONFIGS.dense.gitRepo).toBe(true);
+    });
 
-      it(`${preset} preset should have gitBranch disabled`, () => {
-        expect(PRESET_CONFIGS[preset].gitBranch).toBe(false);
-      });
+    it('should have gitRepo disabled in minimal, focused, and opencode presets', () => {
+      expect(PRESET_CONFIGS.minimal.gitRepo).toBe(false);
+      expect(PRESET_CONFIGS.focused.gitRepo).toBe(false);
+      expect(PRESET_CONFIGS.opencode.gitRepo).toBe(false);
+    });
 
-      it(`${preset} preset should have model disabled`, () => {
+    it('should have gitBranch enabled in focused, full, opencode, and dense presets', () => {
+      expect(PRESET_CONFIGS.focused.gitBranch).toBe(true);
+      expect(PRESET_CONFIGS.full.gitBranch).toBe(true);
+      expect(PRESET_CONFIGS.opencode.gitBranch).toBe(true);
+      expect(PRESET_CONFIGS.dense.gitBranch).toBe(true);
+    });
+
+    it('should have gitBranch disabled in minimal preset', () => {
+      expect(PRESET_CONFIGS.minimal.gitBranch).toBe(false);
+    });
+
+    it('should have model disabled in all presets', () => {
+      presets.forEach(preset => {
         expect(PRESET_CONFIGS[preset].model).toBe(false);
+      });
+    });
+
+    it('should keep token usage display disabled in all presets', () => {
+      presets.forEach(preset => {
+        expect(PRESET_CONFIGS[preset].showTokens).toBe(false);
       });
     });
   });

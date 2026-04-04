@@ -10,11 +10,11 @@
 
 import * as path from 'path';
 import { execSync } from 'child_process';
-import * as os from 'os';
+import { getOmcRoot } from '../../lib/worktree-paths.js';
+import { getClaudeConfigDir } from '../../utils/paths.js';
 import { existsSync, readFileSync } from 'fs';
 import {
   HOOK_NAME,
-  ALLOWED_PATH_PREFIX,
   ALLOWED_PATH_PATTERNS,
   WARNED_EXTENSIONS,
   WRITE_EDIT_TOOLS,
@@ -67,8 +67,8 @@ function getEnforcementLevel(directory: string): EnforcementLevel {
     return enforcementCache.level;
   }
 
-  const localConfig = path.join(directory, '.omc', 'config.json');
-  const globalConfig = path.join(os.homedir(), '.claude', '.omc-config.json');
+  const localConfig = path.join(getOmcRoot(directory), 'config.json');
+  const globalConfig = path.join(getClaudeConfigDir(), '.omc-config.json');
 
   let level: EnforcementLevel = 'warn'; // Default
 
@@ -161,6 +161,11 @@ export function isSourceFile(filePath: string): boolean {
  */
 export function isWriteEditTool(toolName: string): boolean {
   return WRITE_EDIT_TOOLS.includes(toolName);
+}
+
+function isDelegationToolName(toolName: string): boolean {
+  const normalizedToolName = toolName.toLowerCase();
+  return normalizedToolName === 'task' || normalizedToolName === 'agent';
 }
 
 /**
@@ -376,8 +381,10 @@ export function processOrchestratorPreTool(input: ToolExecuteInput): ToolExecute
     return { continue: true };
   }
 
-  // Extract file path from tool input
-  const filePath = (toolInput?.filePath ?? toolInput?.path ?? toolInput?.file) as string | undefined;
+  // Extract file path from tool input.
+  // Claude Code sends file_path (snake_case) for Write/Edit tools and notebook_path for NotebookEdit.
+  // toolInput is the tool's own parameter object, NOT normalized by normalizeHookInput.
+  const filePath = (toolInput?.file_path ?? toolInput?.filePath ?? toolInput?.path ?? toolInput?.file ?? toolInput?.notebook_path) as string | undefined;
 
   // Allow if path is in allowed prefix
   if (!filePath || isAllowedPath(filePath, directory)) {
@@ -449,8 +456,8 @@ export function processOrchestratorPostTool(
     }
   }
 
-  // Handle Task tool completion
-  if (toolName === 'Task' || toolName === 'task') {
+  // Handle delegation tool completion
+  if (isDelegationToolName(toolName)) {
     // Check for background task launch
     const isBackgroundLaunch = output.includes('Background task launched') || output.includes('Background task resumed');
     if (isBackgroundLaunch) {
@@ -524,7 +531,7 @@ export function checkBoulderContinuation(directory: string): {
 /**
  * Create omc orchestrator hook handlers
  */
-export function createSisyphusOrchestratorHook(directory: string) {
+export function createOmcOrchestratorHook(directory: string) {
   return {
     /**
      * Hook name identifier

@@ -10,14 +10,13 @@
  * Ported from oh-my-opencode's ralph hook.
  */
 
-import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  unlinkSync,
-} from "fs";
+import { readFileSync } from "fs";
 import { join } from "path";
+import {
+  writeModeState,
+  readModeState,
+  clearModeStateFile,
+} from "../../lib/mode-state-io.js";
 import {
   readPrd,
   getPrdStatus,
@@ -37,36 +36,48 @@ import {
   readUltraworkState as readUltraworkStateFromModule,
   writeUltraworkState as writeUltraworkStateFromModule,
 } from "../ultrawork/index.js";
-import { resolveSessionStatePath, ensureSessionStateDir } from "../../lib/worktree-paths.js";
+import {
+  resolveSessionStatePath,
+  getOmcRoot,
+} from "../../lib/worktree-paths.js";
+import { readTeamPipelineState } from "../team-pipeline/state.js";
+import type { TeamPipelinePhase } from "../team-pipeline/types.js";
 
 // Forward declaration to avoid circular import - check ultraqa state file directly
-export function isUltraQAActive(directory: string, sessionId?: string): boolean {
+export function isUltraQAActive(
+  directory: string,
+  sessionId?: string,
+): boolean {
   // When sessionId is provided, ONLY check session-scoped path — no legacy fallback
   if (sessionId) {
-    const sessionFile = resolveSessionStatePath('ultraqa', sessionId, directory);
-    if (!existsSync(sessionFile)) {
-      return false;
-    }
+    const sessionFile = resolveSessionStatePath(
+      "ultraqa",
+      sessionId,
+      directory,
+    );
     try {
       const content = readFileSync(sessionFile, "utf-8");
       const state = JSON.parse(content);
       return state && state.active === true;
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return false;
+      }
       return false; // NO legacy fallback
     }
   }
 
   // No sessionId: legacy path (backward compat)
-  const omcDir = join(directory, ".omc");
+  const omcDir = getOmcRoot(directory);
   const stateFile = join(omcDir, "state", "ultraqa-state.json");
-  if (!existsSync(stateFile)) {
-    return false;
-  }
   try {
     const content = readFileSync(stateFile, "utf-8");
     const state = JSON.parse(content);
     return state && state.active === true;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
     return false;
   }
 }
@@ -92,18 +103,25 @@ export interface RalphLoopState {
   current_story_id?: string;
   /** Whether ultrawork is linked/auto-activated with ralph */
   linked_ultrawork?: boolean;
+  /** Reviewer mode for Ralph completion verification */
+  critic_mode?: RalphCriticMode;
 }
+
+export const RALPH_CRITIC_MODES = ['architect', 'critic', 'codex'] as const;
+export type RalphCriticMode = typeof RALPH_CRITIC_MODES[number];
 
 export interface RalphLoopOptions {
   /** Maximum iterations (default: 10) */
   maxIterations?: number;
   /** Disable auto-activation of ultrawork (default: false - ultrawork is enabled) */
   disableUltrawork?: boolean;
+  /** Reviewer mode for Ralph completion verification */
+  criticMode?: RalphCriticMode;
 }
 
 export interface RalphLoopHook {
   startLoop: (
-    sessionId: string,
+    sessionId: string | undefined,
     prompt: string,
     options?: RalphLoopOptions,
   ) => boolean;
@@ -112,68 +130,28 @@ export interface RalphLoopHook {
 }
 
 const DEFAULT_MAX_ITERATIONS = 10;
-
-/**
- * Get the state file path for Ralph Loop
- */
-function getStateFilePath(directory: string, sessionId?: string): string {
-  if (sessionId) {
-    return resolveSessionStatePath('ralph', sessionId, directory);
-  }
-  const omcDir = join(directory, ".omc");
-  return join(omcDir, "state", "ralph-state.json");
-}
-
-/**
- * Ensure the .omc directory exists
- */
-function ensureStateDir(directory: string, sessionId?: string): void {
-  if (sessionId) {
-    ensureSessionStateDir(sessionId, directory);
-    return;
-  }
-  const stateDir = join(directory, ".omc", "state");
-  if (!existsSync(stateDir)) {
-    mkdirSync(stateDir, { recursive: true });
-  }
-}
+const DEFAULT_RALPH_CRITIC_MODE: RalphCriticMode = 'architect';
 
 /**
  * Read Ralph Loop state from disk
  */
-export function readRalphState(directory: string, sessionId?: string): RalphLoopState | null {
-  // When sessionId is provided, ONLY check session-scoped path — no legacy fallback
-  if (sessionId) {
-    const sessionFile = getStateFilePath(directory, sessionId);
-    if (!existsSync(sessionFile)) {
-      return null;
-    }
-    try {
-      const content = readFileSync(sessionFile, "utf-8");
-      const state: RalphLoopState = JSON.parse(content);
-      // Validate session identity
-      if (state.session_id && state.session_id !== sessionId) {
-        return null;
-      }
-      return state;
-    } catch {
-      return null; // NO legacy fallback
-    }
-  }
+export function readRalphState(
+  directory: string,
+  sessionId?: string,
+): RalphLoopState | null {
+  const state = readModeState<RalphLoopState>("ralph", directory, sessionId);
 
-  // No sessionId: legacy path (backward compat)
-  const stateFile = getStateFilePath(directory);
-  if (!existsSync(stateFile)) {
+  // Validate session identity
+  if (
+    state &&
+    sessionId &&
+    state.session_id &&
+    state.session_id !== sessionId
+  ) {
     return null;
   }
 
-  try {
-    const content = readFileSync(stateFile, "utf-8");
-    return JSON.parse(content);
-  } catch (error) {
-    console.error("[ralph] Failed to read state file:", error);
-    return null;
-  }
+  return state;
 }
 
 /**
@@ -182,40 +160,33 @@ export function readRalphState(directory: string, sessionId?: string): RalphLoop
 export function writeRalphState(
   directory: string,
   state: RalphLoopState,
-  sessionId?: string
+  sessionId?: string,
 ): boolean {
-  try {
-    ensureStateDir(directory, sessionId);
-    const stateFile = getStateFilePath(directory, sessionId);
-    writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
-    return true;
-  } catch {
-    return false;
-  }
+  return writeModeState(
+    "ralph",
+    state as unknown as Record<string, unknown>,
+    directory,
+    sessionId,
+  );
 }
 
 /**
- * Clear Ralph Loop state
+ * Clear Ralph Loop state (includes ghost-legacy cleanup)
  */
-export function clearRalphState(directory: string, sessionId?: string): boolean {
-  const stateFile = getStateFilePath(directory, sessionId);
-
-  if (!existsSync(stateFile)) {
-    return true;
-  }
-
-  try {
-    unlinkSync(stateFile);
-    return true;
-  } catch {
-    return false;
-  }
+export function clearRalphState(
+  directory: string,
+  sessionId?: string,
+): boolean {
+  return clearModeStateFile("ralph", directory, sessionId);
 }
 
 /**
  * Clear ultrawork state (only if linked to ralph)
  */
-export function clearLinkedUltraworkState(directory: string, sessionId?: string): boolean {
+export function clearLinkedUltraworkState(
+  directory: string,
+  sessionId?: string,
+): boolean {
   const state = readUltraworkStateFromModule(directory, sessionId);
 
   // Only clear if it was linked to ralph (auto-activated)
@@ -223,28 +194,7 @@ export function clearLinkedUltraworkState(directory: string, sessionId?: string)
     return true;
   }
 
-  // Try session-scoped path first
-  if (sessionId) {
-    const sessionFile = resolveSessionStatePath('ultrawork', sessionId, directory);
-    if (existsSync(sessionFile)) {
-      try {
-        unlinkSync(sessionFile);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-  }
-
-  // Fallback to legacy path
-  const omcDir = join(directory, ".omc");
-  const stateFile = join(omcDir, "state", "ultrawork-state.json");
-  try {
-    unlinkSync(stateFile);
-    return true;
-  } catch {
-    return false;
-  }
+  return clearModeStateFile("ultrawork", directory, sessionId);
 }
 
 /**
@@ -252,7 +202,7 @@ export function clearLinkedUltraworkState(directory: string, sessionId?: string)
  */
 export function incrementRalphIteration(
   directory: string,
-  sessionId?: string
+  sessionId?: string,
 ): RalphLoopState | null {
   const state = readRalphState(directory, sessionId);
 
@@ -269,12 +219,65 @@ export function incrementRalphIteration(
   return null;
 }
 
+// ============================================================================
+// PRD Flag Helpers
+// ============================================================================
+
+/**
+ * Detect if prompt contains --no-prd flag (case-insensitive)
+ */
+export function detectNoPrdFlag(prompt: string): boolean {
+  return /--no-prd/i.test(prompt);
+}
+
+/**
+ * Strip --no-prd flag from prompt text and trim whitespace
+ */
+export function stripNoPrdFlag(prompt: string): string {
+  return prompt
+    .replace(/--no-prd/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Normalize a Ralph critic mode flag value.
+ */
+export function normalizeRalphCriticMode(value: string | null | undefined): RalphCriticMode | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return (RALPH_CRITIC_MODES as readonly string[]).includes(normalized)
+    ? normalized as RalphCriticMode
+    : null;
+}
+
+/**
+ * Detect --critic=<mode> flag (case-insensitive).
+ */
+export function detectCriticModeFlag(prompt: string): RalphCriticMode | null {
+  const match = prompt.match(/--critic(?:=|\s+)([^\s]+)/i);
+  return normalizeRalphCriticMode(match?.[1]);
+}
+
+/**
+ * Strip --critic=<mode> flag from prompt text and trim whitespace.
+ */
+export function stripCriticModeFlag(prompt: string): string {
+  return prompt
+    .replace(/--critic(?:=|\s+)([^\s]+)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /**
  * Create a Ralph Loop hook instance
  */
 export function createRalphLoopHook(directory: string): RalphLoopHook {
   const startLoop = (
-    sessionId: string,
+    sessionId: string | undefined,
     prompt: string,
     options?: RalphLoopOptions,
   ): boolean => {
@@ -298,6 +301,7 @@ export function createRalphLoopHook(directory: string): RalphLoopHook {
       session_id: sessionId,
       project_path: directory,
       linked_ultrawork: enableUltrawork,
+      critic_mode: options?.criticMode ?? detectCriticModeFlag(prompt) ?? DEFAULT_RALPH_CRITIC_MODE,
     };
 
     const ralphSuccess = writeRalphState(directory, state, sessionId);
@@ -316,6 +320,19 @@ export function createRalphLoopHook(directory: string): RalphLoopHook {
         project_path: directory,
       };
       writeUltraworkStateFromModule(ultraworkState, directory, sessionId);
+    }
+
+    // Auto-enable PRD mode if prd.json exists
+    if (ralphSuccess && hasPrd(directory)) {
+      state.prd_mode = true;
+      const prdCompletion = getPrdCompletionStatus(directory);
+      if (prdCompletion.nextStory) {
+        state.current_story_id = prdCompletion.nextStory.id;
+      }
+      // Initialize progress.txt if it doesn't exist
+      initProgress(directory);
+      // Write updated state with PRD fields
+      writeRalphState(directory, state, sessionId);
     }
 
     return ralphSuccess;
@@ -471,6 +488,43 @@ export function recordStoryProgress(
  */
 export function recordPattern(directory: string, pattern: string): boolean {
   return addPattern(directory, pattern);
+}
+
+/**
+ * Check if an active team pipeline should influence ralph loop continuation.
+ * Returns:
+ *  - 'continue' if team is in a phase where ralph should keep looping (team-verify, team-fix, team-exec)
+ *  - 'complete' if team reached a terminal state (complete, failed)
+ *  - null if no team state is active (ralph operates independently)
+ */
+export function getTeamPhaseDirective(
+  directory: string,
+  sessionId?: string,
+): "continue" | "complete" | null {
+  const teamState = readTeamPipelineState(directory, sessionId);
+  if (!teamState || !teamState.active) {
+    // Check terminal states even when active=false
+    if (teamState) {
+      const terminalPhases: TeamPipelinePhase[] = ["complete", "failed"];
+      if (terminalPhases.includes(teamState.phase)) {
+        return "complete";
+      }
+    }
+    return null;
+  }
+
+  const continuePhases: TeamPipelinePhase[] = [
+    "team-verify",
+    "team-fix",
+    "team-exec",
+    "team-plan",
+    "team-prd",
+  ];
+  if (continuePhases.includes(teamState.phase)) {
+    return "continue";
+  }
+
+  return null;
 }
 
 /**

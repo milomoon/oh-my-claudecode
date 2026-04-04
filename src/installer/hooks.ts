@@ -9,10 +9,11 @@
  * Bash scripts were deprecated in v3.8.6 and removed in v3.9.0.
  */
 
-import { homedir } from "os";
 import { join, dirname } from "path";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { homedir } from "os";
+import { getConfigDir } from '../utils/config-dir.js';
 
 // =============================================================================
 // TEMPLATE LOADER (loads hook scripts from templates/hooks/)
@@ -20,13 +21,25 @@ import { fileURLToPath } from "url";
 
 /**
  * Get the package root directory (where templates/ lives)
- * Works for both development (src/) and production (dist/)
+ * Works for both development (src/), production (dist/), and CJS bundles (bridge/).
+ * When esbuild bundles to CJS, import.meta is replaced with {} so we
+ * fall back to __dirname which is natively available in CJS.
  */
 function getPackageDir(): string {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // From src/installer/ or dist/installer/, go up two levels to package root
-  return join(__dirname, "..", "..");
+  // CJS bundle path (bridge/cli.cjs): from bridge/ go up 1 level to package root
+  if (typeof __dirname !== "undefined") {
+    return join(__dirname, "..");
+  }
+  // ESM path (works in dev via ts/dist)
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    // From src/installer/ or dist/installer/, go up two levels to package root
+    return join(__dirname, "..", "..");
+  } catch {
+    // import.meta.url unavailable — last resort
+    return process.cwd();
+  }
 }
 
 /**
@@ -56,17 +69,10 @@ export function isWindows(): boolean {
   return process.platform === "win32";
 }
 
-/**
- * Check if Node.js hooks should be used.
- * @deprecated Always returns true. Bash hooks were removed in v3.9.0.
- */
-export function shouldUseNodeHooks(): boolean {
-  return true;
-}
 
 /** Get the Claude config directory path (cross-platform) */
 export function getClaudeConfigDir(): string {
-  return join(homedir(), ".claude");
+  return getConfigDir();
 }
 
 /** Get the hooks directory path */
@@ -80,6 +86,34 @@ export function getHooksDir(): string {
  */
 export function getHomeEnvVar(): string {
   return isWindows() ? "%USERPROFILE%" : "$HOME";
+}
+
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function isDefaultClaudeConfigDir(): boolean {
+  return normalizePath(getClaudeConfigDir()) === normalizePath(join(homedir(), '.claude'));
+}
+
+function quoteCommandPath(path: string): string {
+  return `"${path.replace(/"/g, '\\"')}"`;
+}
+
+function buildHookCommand(filename: string): string {
+  if (isWindows()) {
+    if (isDefaultClaudeConfigDir()) {
+      return `node "%USERPROFILE%\\\\.claude\\\\hooks\\\\${filename}"`;
+    }
+
+    return `node ${quoteCommandPath(join(getClaudeConfigDir(), 'hooks', filename))}`;
+  }
+
+  if (isDefaultClaudeConfigDir()) {
+    return `node "$HOME/.claude/hooks/${filename}"`;
+  }
+
+  return `node ${quoteCommandPath(join(getClaudeConfigDir(), 'hooks', filename).replace(/\\/g, '/'))}`;
 }
 
 /**
@@ -97,7 +131,7 @@ TELL THE USER WHAT AGENTS YOU WILL LEVERAGE NOW TO SATISFY USER'S REQUEST.
 
 ## AGENT UTILIZATION PRINCIPLES (by capability, not by name)
 - **Codebase Exploration**: Spawn exploration agents using BACKGROUND TASKS for file patterns, internal implementations, project structure
-- **Documentation & References**: Use researcher-type agents via BACKGROUND TASKS for API references, examples, external library docs
+- **Documentation & References**: Use document-specialist agents via BACKGROUND TASKS for API references, examples, external library docs
 - **Planning & Strategy**: NEVER plan yourself - ALWAYS spawn a dedicated planning agent for work breakdown
 - **High-IQ Reasoning**: Leverage specialized agents for architecture decisions, code review, strategic planning
 - **Frontend/UI Tasks**: Delegate to UI-specialized agents for design and implementation
@@ -105,13 +139,13 @@ TELL THE USER WHAT AGENTS YOU WILL LEVERAGE NOW TO SATISFY USER'S REQUEST.
 ## EXECUTION RULES
 - **TODO**: Track EVERY step. Mark complete IMMEDIATELY after each.
 - **PARALLEL**: Fire independent agent calls simultaneously via Task(run_in_background=true) - NEVER wait sequentially.
-- **BACKGROUND FIRST**: Use Task tool for exploration/research agents (10+ concurrent if needed).
+- **BACKGROUND FIRST**: Use Task tool for exploration/document-specialist agents (10+ concurrent if needed).
 - **VERIFY**: Re-read request after completion. Check ALL requirements met before reporting done.
 - **DELEGATE**: Don't do everything yourself - orchestrate specialized agents for their strengths.
 
 ## WORKFLOW
 1. Analyze the request and identify required capabilities
-2. Spawn exploration/researcher agents via Task(run_in_background=true) in PARALLEL (10+ if needed)
+2. Spawn exploration/document-specialist agents via Task(run_in_background=true) in PARALLEL (10+ if needed)
 3. Always Use Plan agent with gathered context to create detailed work breakdown
 4. Execute with continuous verification against original requirements
 
@@ -208,7 +242,7 @@ Use your extended thinking capabilities to provide the most thorough and well-re
 export const SEARCH_MESSAGE = `<search-mode>
 MAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:
 - explore agents (codebase patterns, file structures)
-- researcher agents (remote repos, official docs, GitHub examples)
+- document-specialist agents (remote repos, official docs, GitHub examples)
 Plus direct tools: Grep, Glob
 NEVER stop at first result - be exhaustive.
 </search-mode>
@@ -226,7 +260,7 @@ ANALYSIS MODE. Gather context before diving deep:
 
 CONTEXT GATHERING (parallel):
 - 1-2 explore agents (codebase patterns, implementations)
-- 1-2 researcher agents (if external library involved)
+- 1-2 document-specialist agents (if external library involved)
 - Direct tools: Grep, Glob, LSP for targeted searches
 
 IF COMPLEX (architecture, multi-system, debugging after 2+ failures):
@@ -234,6 +268,60 @@ IF COMPLEX (architecture, multi-system, debugging after 2+ failures):
 
 SYNTHESIZE findings before proceeding.
 </analyze-mode>
+
+---
+
+`;
+
+/**
+ * Code review mode message
+ * Replaces skills/code-review/SKILL.md after skill deletion
+ */
+export const CODE_REVIEW_MESSAGE = `<code-review-mode>
+[CODE REVIEW MODE ACTIVATED]
+Perform a comprehensive code review of the relevant changes or target area. Focus on correctness, maintainability, edge cases, regressions, and test adequacy before recommending changes.
+</code-review-mode>
+
+---
+
+`;
+
+/**
+ * Security review mode message
+ * Replaces skills/security-review/SKILL.md after skill deletion
+ */
+export const SECURITY_REVIEW_MESSAGE = `<security-review-mode>
+[SECURITY REVIEW MODE ACTIVATED]
+Perform a focused security review of the relevant changes or target area. Check trust boundaries, auth/authz, data exposure, input validation, command/file access, secrets handling, and escalation risks before recommending changes.
+</security-review-mode>
+
+---
+
+`;
+
+/**
+ * TDD mode message
+ * Replaces skills/tdd/SKILL.md after skill deletion
+ */
+export const TDD_MESSAGE = `<tdd-mode>
+[TDD MODE ACTIVATED]
+
+THE IRON LAW: NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST.
+Write code before test? DELETE IT. Start over. No exceptions.
+
+RED-GREEN-REFACTOR CYCLE:
+1. RED: Write failing test for NEXT functionality. Run it - MUST FAIL.
+2. GREEN: Write ONLY enough code to pass. No extras. Run test - MUST PASS.
+3. REFACTOR: Clean up. Run tests after EVERY change. Must stay green.
+4. REPEAT with next failing test.
+
+ENFORCEMENT:
+- Code written before test → STOP. Delete code. Write test first.
+- Test passes on first run → Test is wrong. Fix it to fail first.
+- Multiple features in one cycle → STOP. One test, one feature.
+
+Delegate to test-engineer agent for test strategy. The discipline IS the value.
+</tdd-mode>
 
 ---
 
@@ -272,6 +360,15 @@ Ralph mode auto-activates Ultrawork for maximum parallel execution. Follow these
 Continue working until the task is truly done.
 `;
 
+/**
+ * Prompt translation message - injected when non-English input detected
+ * Reminds users to write prompts in English for consistent agent routing
+ */
+export const PROMPT_TRANSLATION_MESSAGE = `[PROMPT TRANSLATION] Non-English input detected.
+When delegating via Task(), write prompt arguments in English for consistent agent routing.
+Respond to the user in their original language.
+`;
+
 // =============================================================================
 // NODE.JS HOOK SCRIPTS (Cross-platform: Windows, macOS, Linux)
 // =============================================================================
@@ -288,6 +385,9 @@ export const STOP_CONTINUATION_SCRIPT_NODE = loadTemplate(
 
 /** Node.js persistent mode hook script - loaded from templates/hooks/persistent-mode.mjs */
 export const PERSISTENT_MODE_SCRIPT_NODE = loadTemplate("persistent-mode.mjs");
+
+/** Node.js code simplifier hook script - loaded from templates/hooks/code-simplifier.mjs */
+export const CODE_SIMPLIFIER_SCRIPT_NODE = loadTemplate("code-simplifier.mjs");
 
 /** Node.js session start hook script - loaded from templates/hooks/session-start.mjs */
 export const SESSION_START_SCRIPT_NODE = loadTemplate("session-start.mjs");
@@ -310,11 +410,7 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            // Note: On Windows, %USERPROFILE% is expanded by cmd.exe
-            // On Unix with node hooks, $HOME is expanded by the shell
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\keyword-detector.mjs"'
-              : 'node "$HOME/.claude/hooks/keyword-detector.mjs"',
+            command: buildHookCommand('keyword-detector.mjs'),
           },
         ],
       },
@@ -324,9 +420,7 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\session-start.mjs"'
-              : 'node "$HOME/.claude/hooks/session-start.mjs"',
+            command: buildHookCommand('session-start.mjs'),
           },
         ],
       },
@@ -336,9 +430,7 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\pre-tool-use.mjs"'
-              : 'node "$HOME/.claude/hooks/pre-tool-use.mjs"',
+            command: buildHookCommand('pre-tool-use.mjs'),
           },
         ],
       },
@@ -348,9 +440,7 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\post-tool-use.mjs"'
-              : 'node "$HOME/.claude/hooks/post-tool-use.mjs"',
+            command: buildHookCommand('post-tool-use.mjs'),
           },
         ],
       },
@@ -360,9 +450,7 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\post-tool-use-failure.mjs"'
-              : 'node "$HOME/.claude/hooks/post-tool-use-failure.mjs"',
+            command: buildHookCommand('post-tool-use-failure.mjs'),
           },
         ],
       },
@@ -372,9 +460,15 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
         hooks: [
           {
             type: "command" as const,
-            command: isWindows()
-              ? 'node "%USERPROFILE%\\.claude\\hooks\\persistent-mode.mjs"'
-              : 'node "$HOME/.claude/hooks/persistent-mode.mjs"',
+            command: buildHookCommand('persistent-mode.mjs'),
+          },
+        ],
+      },
+      {
+        hooks: [
+          {
+            type: "command" as const,
+            command: buildHookCommand('code-simplifier.mjs'),
           },
         ],
       },
@@ -384,30 +478,11 @@ export const HOOKS_SETTINGS_CONFIG_NODE = {
 
 /**
  * Get the hooks settings config (Node.js only).
+ *
+ * @deprecated Hooks are now delivered via the plugin's hooks/hooks.json.
+ * settings.json hook entries are no longer written by the installer.
+ * Kept for test compatibility only.
  */
 export function getHooksSettingsConfig(): typeof HOOKS_SETTINGS_CONFIG_NODE {
   return HOOKS_SETTINGS_CONFIG_NODE;
-}
-
-// =============================================================================
-// HOOK SCRIPTS EXPORTS
-// =============================================================================
-
-/**
- * Get Node.js hook scripts (Cross-platform)
- * Returns a record of filename -> content for all Node.js hooks
- */
-export function getHookScripts(): Record<string, string> {
-  return {
-    "keyword-detector.mjs": loadTemplate("keyword-detector.mjs"),
-    "stop-continuation.mjs": loadTemplate("stop-continuation.mjs"),
-    "persistent-mode.mjs": loadTemplate("persistent-mode.mjs"),
-    "session-start.mjs": loadTemplate("session-start.mjs"),
-    "pre-tool-use.mjs": loadTemplate("pre-tool-use.mjs"),
-    "post-tool-use.mjs": loadTemplate("post-tool-use.mjs"),
-    "post-tool-use-failure.mjs": loadTemplate("post-tool-use-failure.mjs"),
-    // Shared library modules (in lib/ subdirectory)
-    "lib/stdin.mjs": loadTemplate("lib/stdin.mjs"),
-    "lib/atomic-write.mjs": loadTemplate("lib/atomic-write.mjs"),
-  };
 }

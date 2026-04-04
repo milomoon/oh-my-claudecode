@@ -10,6 +10,7 @@
  * Sensitive hooks use strict allowlists; others pass through unknown fields.
  */
 import { z } from 'zod';
+import { resolveTranscriptPath } from '../lib/worktree-paths.js';
 // --- Zod schemas for hook input validation ---
 /** Schema for the common hook input structure (supports both snake_case and camelCase) */
 const HookInputSchema = z.object({
@@ -59,6 +60,8 @@ const KNOWN_FIELDS = new Set([
     'agent_id', 'agent_name', 'agent_type', 'parent_session_id',
     // Common extra fields from Claude Code
     'input', 'output', 'result', 'error', 'status',
+    // Session-end fields
+    'reason',
 ]);
 // --- Fast-path detection ---
 /** Typical camelCase keys that indicate already-normalized input */
@@ -104,6 +107,11 @@ export function normalizeHookInput(raw, hookType) {
     const rawObj = raw;
     // Fast path: if input is already camelCase, skip Zod parse entirely
     if (isAlreadyCamelCase(rawObj)) {
+        const passthrough = filterPassthrough(rawObj, hookType);
+        // Resolve worktree-mismatched transcript paths (issue #1094)
+        if (passthrough.transcript_path) {
+            passthrough.transcript_path = resolveTranscriptPath(passthrough.transcript_path, rawObj.directory);
+        }
         return {
             sessionId: rawObj.sessionId,
             toolName: rawObj.toolName,
@@ -113,7 +121,7 @@ export function normalizeHookInput(raw, hookType) {
             prompt: rawObj.prompt,
             message: rawObj.message,
             parts: rawObj.parts,
-            ...filterPassthrough(rawObj, hookType),
+            ...passthrough,
         };
     }
     // Validate with Zod - use safeParse so malformed input doesn't throw
@@ -123,6 +131,11 @@ export function normalizeHookInput(raw, hookType) {
         console.error('[bridge-normalize] Zod validation warning:', parsed.error.issues.map(i => i.message).join(', '));
     }
     const input = (parsed.success ? parsed.data : raw);
+    const extraFields = filterPassthrough(input, hookType);
+    // Resolve worktree-mismatched transcript paths (issue #1094)
+    if (extraFields.transcript_path) {
+        extraFields.transcript_path = resolveTranscriptPath(extraFields.transcript_path, (input.cwd ?? input.directory));
+    }
     return {
         sessionId: input.session_id ?? input.sessionId,
         toolName: input.tool_name ?? input.toolName,
@@ -134,7 +147,7 @@ export function normalizeHookInput(raw, hookType) {
         message: input.message,
         parts: input.parts,
         // Pass through extra fields with sensitivity filtering
-        ...filterPassthrough(input, hookType),
+        ...extraFields,
     };
 }
 /**
@@ -169,7 +182,7 @@ function filterPassthrough(input, hookType) {
             // Conservative: pass through but warn on truly unknown fields
             extra[key] = value;
             if (!KNOWN_FIELDS.has(key)) {
-                console.debug(`[bridge-normalize] Unknown field "${key}" passed through for hook "${hookType ?? 'unknown'}"`);
+                console.error(`[bridge-normalize] Unknown field "${key}" passed through for hook "${hookType ?? 'unknown'}"`);
             }
         }
     }
